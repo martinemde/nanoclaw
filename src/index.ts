@@ -30,6 +30,7 @@ import {
   ensureContainerRuntimeRunning,
 } from './container-runtime.js';
 import {
+  deleteSession,
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
@@ -66,6 +67,18 @@ import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
+
+const CLEAR_COMMAND = /^\/clear$/i;
+const RESUME_COMMAND = /^\/resume\s+(\S+)/i;
+
+function isClearCommand(content: string): boolean {
+  return CLEAR_COMMAND.test(content.trim());
+}
+
+function parseResumeCommand(content: string): string | null {
+  const match = content.trim().match(RESUME_COMMAND);
+  return match ? match[1] : null;
+}
 
 let lastTimestamp = '';
 let sessions: Record<string, string> = {};
@@ -236,6 +249,38 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   );
 
   if (missedMessages.length === 0) return true;
+
+  // Check for /clear or /resume commands before trigger check
+  const clearMsg = missedMessages.find((m) => isClearCommand(m.content));
+  const resumeMsg = missedMessages.find((m) => parseResumeCommand(m.content));
+  if (clearMsg || resumeMsg) {
+    const channel = findChannel(channels, chatJid);
+    lastAgentTimestamp[chatJid] =
+      missedMessages[missedMessages.length - 1].timestamp;
+
+    if (clearMsg) {
+      const oldSessionId = sessions[group.folder] || 'none';
+      delete sessions[group.folder];
+      deleteSession(group.folder);
+      if (channel) {
+        await channel.sendMessage(chatJid, `Context cleared. Previous session: ${oldSessionId}`);
+      }
+      logger.info({ group: group.name, oldSessionId }, 'Session cleared by user command');
+    }
+
+    if (resumeMsg) {
+      const newSessionId = parseResumeCommand(resumeMsg.content)!;
+      sessions[group.folder] = newSessionId;
+      setSession(group.folder, newSessionId);
+      if (channel) {
+        await channel.sendMessage(chatJid, `Resumed session: ${newSessionId}`);
+      }
+      logger.info({ group: group.name, newSessionId }, 'Session resumed by user command');
+    }
+
+    saveState();
+    return true;
+  }
 
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
@@ -459,6 +504,41 @@ async function startMessageLoop(): Promise<void> {
           const channel = findChannel(channels, chatJid);
           if (!channel) {
             logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
+            continue;
+          }
+
+          // Check for /clear or /resume before trigger check
+          const clearMsg = groupMessages.find((m) => isClearCommand(m.content));
+          const resumeMsg = groupMessages.find((m) => parseResumeCommand(m.content));
+          if (clearMsg || resumeMsg) {
+            const allPending = getMessagesSince(
+              chatJid,
+              lastAgentTimestamp[chatJid] || '',
+              ASSISTANT_NAME,
+            );
+            const latest = allPending.length > 0 ? allPending : groupMessages;
+            lastAgentTimestamp[chatJid] =
+              latest[latest.length - 1].timestamp;
+
+            if (clearMsg) {
+              const oldSessionId = sessions[group.folder] || 'none';
+              delete sessions[group.folder];
+              deleteSession(group.folder);
+              queue.closeStdin(chatJid);
+              await channel.sendMessage(chatJid, `Context cleared. Previous session: ${oldSessionId}`);
+              logger.info({ group: group.name, oldSessionId }, 'Session cleared by user command');
+            }
+
+            if (resumeMsg) {
+              const newSessionId = parseResumeCommand(resumeMsg.content)!;
+              sessions[group.folder] = newSessionId;
+              setSession(group.folder, newSessionId);
+              queue.closeStdin(chatJid);
+              await channel.sendMessage(chatJid, `Resumed session: ${newSessionId}`);
+              logger.info({ group: group.name, newSessionId }, 'Session resumed by user command');
+            }
+
+            saveState();
             continue;
           }
 

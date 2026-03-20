@@ -3,14 +3,17 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import {
   _initTestDatabase,
   createTask,
+  deleteSession,
   deleteTask,
   getAllChats,
   getAllRegisteredGroups,
   getLastBotMessageTimestamp,
   getMessagesSince,
   getNewMessages,
+  getSession,
   getTaskById,
   setRegisteredGroup,
+  setSession,
   storeChatMetadata,
   storeMessage,
   updateTask,
@@ -416,6 +419,25 @@ describe('storeChatMetadata', () => {
     storeChatMetadata('group@g.us', '2024-01-01T00:00:01.000Z');
     const chats = getAllChats();
     expect(chats[0].last_message_time).toBe('2024-01-01T00:00:05.000Z');
+  });
+});
+
+// --- Session management ---
+
+describe('session management', () => {
+  it('sets and retrieves a session', () => {
+    setSession('main', 'session-abc');
+    expect(getSession('main')).toBe('session-abc');
+  });
+
+  it('deletes a session', () => {
+    setSession('main', 'session-abc');
+    deleteSession('main');
+    expect(getSession('main')).toBeUndefined();
+  });
+
+  it('deleteSession is a no-op for nonexistent folder', () => {
+    expect(() => deleteSession('nonexistent')).not.toThrow();
   });
 });
 

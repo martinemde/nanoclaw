@@ -2,7 +2,7 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
  */
-import { ChildProcess, spawn } from 'child_process';
+import { ChildProcess, execSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -159,6 +159,7 @@ function buildVolumeMounts(
       fs.cpSync(srcDir, dstDir, { recursive: true });
     }
   }
+  ensureMountWritable(groupSessionsDir);
   mounts.push({
     hostPath: groupSessionsDir,
     containerPath: '/home/node/.claude',
@@ -171,6 +172,7 @@ function buildVolumeMounts(
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
+  ensureMountWritable(groupIpcDir);
   mounts.push({
     hostPath: groupIpcDir,
     containerPath: '/workspace/ipc',
@@ -223,6 +225,29 @@ function buildVolumeMounts(
   return mounts;
 }
 
+/** Detect if we're running rootless Podman (UID namespace remapping). */
+function isRootlessPodman(): boolean {
+  if (CONTAINER_RUNTIME_BIN !== 'podman') return false;
+  const hostUid = process.getuid?.();
+  return hostUid != null && hostUid !== 0;
+}
+
+/**
+ * Ensure a writable mount directory is accessible inside the container.
+ * Rootless Podman remaps UIDs, so host files owned by the calling user
+ * appear as root inside the container. The container's node user (uid
+ * 1000) can't write to root-owned directories. Making them world-writable
+ * is safe because these directories are per-group sandboxed data.
+ */
+function ensureMountWritable(hostPath: string): void {
+  if (!isRootlessPodman()) return;
+  try {
+    execSync(`chmod -R a+rwX ${hostPath}`, { stdio: 'pipe' });
+  } catch (err) {
+    logger.warn({ err, hostPath }, 'Failed to make mount writable for rootless Podman');
+  }
+}
+
 async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
@@ -252,13 +277,17 @@ async function buildContainerArgs(
   args.push(...hostGatewayArgs());
 
   // Run as host user so bind-mounted files are accessible.
-  // Skip when running as root (uid 0), as the container's node user (uid 1000),
-  // or when getuid is unavailable (native Windows without WSL).
-  const hostUid = process.getuid?.();
-  const hostGid = process.getgid?.();
-  if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
-    args.push('--user', `${hostUid}:${hostGid}`);
-    args.push('-e', 'HOME=/home/node');
+  // Skip for rootless Podman — its user namespace remapping handles UID
+  // mapping automatically, and passing --user breaks mount permissions.
+  // Also skip when running as root (uid 0), as the container's node user
+  // (uid 1000), or when getuid is unavailable (native Windows without WSL).
+  if (!isRootlessPodman()) {
+    const hostUid = process.getuid?.();
+    const hostGid = process.getgid?.();
+    if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
+      args.push('--user', `${hostUid}:${hostGid}`);
+      args.push('-e', 'HOME=/home/node');
+    }
   }
 
   for (const mount of mounts) {
