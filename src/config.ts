@@ -81,6 +81,11 @@ export function getTriggerPattern(trigger?: string): RegExp {
 
 export const TRIGGER_PATTERN = buildTriggerPattern(DEFAULT_TRIGGER);
 
+// Matrix channel (optional — channel only starts if all three are set)
+export const MATRIX_HOMESERVER_URL = process.env.MATRIX_HOMESERVER_URL || '';
+export const MATRIX_ACCESS_TOKEN = process.env.MATRIX_ACCESS_TOKEN || '';
+export const MATRIX_USER_ID = process.env.MATRIX_USER_ID || '';
+
 // Timezone for scheduled tasks, message formatting, etc.
 // Validates each candidate is a real IANA identifier before accepting.
 function resolveConfigTimezone(): string {

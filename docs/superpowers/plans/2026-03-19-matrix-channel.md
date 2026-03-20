@@ -4,7 +4,7 @@
 
 **Goal:** Add Matrix as a second messaging channel in NanoClaw so the bot can participate in Matrix rooms on the private Tuwunel homeserver.
 
-**Architecture:** Implement `MatrixChannel` class following the existing `Channel` interface pattern. The channel uses `matrix-bot-sdk` to connect to Tuwunel, auto-joins rooms on invite, and routes messages through the existing group queue and container agent pipeline. Both WhatsApp and Matrix channels run simultaneously.
+**Architecture:** Implement `MatrixChannel` class following the upstream channel registry pattern. The channel module self-registers via `registerChannel()` at import time, with a factory that returns `null` when credentials are missing. The channel uses `matrix-bot-sdk` to connect to Tuwunel, auto-joins rooms on invite, and routes messages through the existing group queue and container agent pipeline. Both WhatsApp and Matrix channels run simultaneously.
 
 **Tech Stack:** TypeScript, matrix-bot-sdk, vitest
 
@@ -14,10 +14,10 @@
 
 | Action | File | Responsibility |
 |--------|------|----------------|
-| Create | `src/channels/matrix.ts` | MatrixChannel class implementing Channel interface |
+| Create | `src/channels/matrix.ts` | MatrixChannel class + self-registration via registerChannel() |
 | Create | `src/channels/matrix.test.ts` | Unit tests for MatrixChannel |
 | Modify | `src/config.ts` | Add Matrix env var exports |
-| Modify | `src/index.ts` | Wire MatrixChannel into channels array |
+| Modify | `src/channels/index.ts` | Add matrix import to channel barrel file |
 | Modify | `package.json` | Add matrix-bot-sdk dependency |
 | Modify | `ansible/roles/nanoclaw/templates/nanoclaw-env.j2` (homestead repo) | Add Matrix env vars |
 | Modify | `ansible/inventory/host_vars/pi/vault.yml` (homestead repo) | Add Matrix access token |
@@ -87,7 +87,7 @@ git commit -m "Add Matrix channel config variables"
 **Files:**
 - Create: `src/channels/matrix.test.ts`
 
-Follow the same mock/test structure as `src/channels/whatsapp.test.ts`. Mock `matrix-bot-sdk` instead of Baileys.
+Follow the same mock/test structure as the WhatsApp channel tests. Mock `matrix-bot-sdk` instead of Baileys.
 
 - [ ] **Step 1: Write the test file**
 
@@ -145,13 +145,14 @@ vi.mock('matrix-bot-sdk', () => {
   };
 });
 
-import { MatrixChannel, MatrixChannelOpts } from './matrix.js';
+import { MatrixChannel } from './matrix.js';
+import type { ChannelOpts } from './registry.js';
 
 // --- Test helpers ---
 
 function createTestOpts(
-  overrides?: Partial<MatrixChannelOpts>,
-): MatrixChannelOpts {
+  overrides?: Partial<ChannelOpts>,
+): ChannelOpts {
   return {
     onMessage: vi.fn(),
     onChatMetadata: vi.fn(),
@@ -398,27 +399,17 @@ import {
   MATRIX_USER_ID,
 } from '../config.js';
 import { logger } from '../logger.js';
-import {
-  Channel,
-  OnInboundMessage,
-  OnChatMetadata,
-  RegisteredGroup,
-} from '../types.js';
-
-export interface MatrixChannelOpts {
-  onMessage: OnInboundMessage;
-  onChatMetadata: OnChatMetadata;
-  registeredGroups: () => Record<string, RegisteredGroup>;
-}
+import { Channel } from '../types.js';
+import { ChannelOpts, registerChannel } from './registry.js';
 
 export class MatrixChannel implements Channel {
   name = 'matrix';
 
   private client: MatrixClient;
   private connected = false;
-  private opts: MatrixChannelOpts;
+  private opts: ChannelOpts;
 
-  constructor(opts: MatrixChannelOpts) {
+  constructor(opts: ChannelOpts) {
     this.opts = opts;
     const storage = new SimpleFsStorageProvider('store/matrix-bot.json');
     this.client = new MatrixClient(
@@ -516,6 +507,12 @@ export class MatrixChannel implements Channel {
     }
   }
 }
+
+// Self-register: factory returns null when credentials are missing
+registerChannel('matrix', (opts) => {
+  if (!MATRIX_HOMESERVER_URL || !MATRIX_ACCESS_TOKEN) return null;
+  return new MatrixChannel(opts);
+});
 ```
 
 - [ ] **Step 2: Run tests to verify they pass**
@@ -539,63 +536,38 @@ git commit -m "Add MatrixChannel implementation"
 
 ## Chunk 2: Wiring & Deployment
 
-### Task 5: Wire MatrixChannel into index.ts
+### Task 5: Register Matrix in channel barrel file
 
 **Files:**
-- Modify: `src/index.ts`
+- Modify: `src/channels/index.ts`
 
-- [ ] **Step 1: Add Matrix import**
+The upstream channel registry auto-discovers channels via the barrel file.
+Each import triggers the channel module's `registerChannel()` call.
 
-At the top of `src/index.ts`, after the WhatsApp import (line 11):
+- [ ] **Step 1: Add matrix import to `src/channels/index.ts`**
 
-```typescript
-import { MatrixChannel } from './channels/matrix.js';
-```
-
-- [ ] **Step 2: Add Matrix config import**
-
-Update the config import (line 4) to also import Matrix vars:
+Add after the existing commented channel lines:
 
 ```typescript
-import {
-  ASSISTANT_NAME,
-  IDLE_TIMEOUT,
-  MAIN_GROUP_FOLDER,
-  MATRIX_ACCESS_TOKEN,
-  MATRIX_HOMESERVER_URL,
-  POLL_INTERVAL,
-  TRIGGER_PATTERN,
-} from './config.js';
+// matrix
+import './matrix.js';
 ```
 
-- [ ] **Step 3: Wire MatrixChannel in main()**
-
-In the `main()` function, after the WhatsApp connect block (after line 560), add:
-
-```typescript
-  // Optionally start Matrix channel
-  if (MATRIX_HOMESERVER_URL && MATRIX_ACCESS_TOKEN) {
-    const matrix = new MatrixChannel(channelOpts);
-    channels.push(matrix);
-    await matrix.connect();
-  }
-```
-
-- [ ] **Step 4: Run typecheck**
+- [ ] **Step 2: Run typecheck**
 
 Run: `npx tsc --noEmit`
 Expected: No errors
 
-- [ ] **Step 5: Run all tests**
+- [ ] **Step 3: Run all tests**
 
 Run: `npx vitest run`
 Expected: All tests PASS
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add src/index.ts
-git commit -m "Wire Matrix channel into NanoClaw startup"
+git add src/channels/index.ts
+git commit -m "Register Matrix channel in barrel file"
 ```
 
 ---
