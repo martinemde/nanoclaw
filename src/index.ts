@@ -30,7 +30,6 @@ import {
   ensureContainerRuntimeRunning,
 } from './container-runtime.js';
 import {
-  deleteSession,
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
@@ -61,24 +60,13 @@ import {
   loadSenderAllowlist,
   shouldDropMessage,
 } from './sender-allowlist.js';
+import { extractSessionCommand, handleSessionCommand, isSessionCommandAllowed } from './session-commands.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
-
-const CLEAR_COMMAND = /^\/clear$/i;
-const RESUME_COMMAND = /^\/resume\s+(\S+)/i;
-
-function isClearCommand(content: string): boolean {
-  return CLEAR_COMMAND.test(content.trim());
-}
-
-function parseResumeCommand(content: string): string | null {
-  const match = content.trim().match(RESUME_COMMAND);
-  return match ? match[1] : null;
-}
 
 let lastTimestamp = '';
 let sessions: Record<string, string> = {};
@@ -250,37 +238,36 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
-  // Check for /clear or /resume commands before trigger check
-  const clearMsg = missedMessages.find((m) => isClearCommand(m.content));
-  const resumeMsg = missedMessages.find((m) => parseResumeCommand(m.content));
-  if (clearMsg || resumeMsg) {
-    const channel = findChannel(channels, chatJid);
-    lastAgentTimestamp[chatJid] =
-      missedMessages[missedMessages.length - 1].timestamp;
-
-    if (clearMsg) {
-      const oldSessionId = sessions[group.folder] || 'none';
-      delete sessions[group.folder];
-      deleteSession(group.folder);
-      if (channel) {
-        await channel.sendMessage(chatJid, `Context cleared. Previous session: ${oldSessionId}`);
-      }
-      logger.info({ group: group.name, oldSessionId }, 'Session cleared by user command');
-    }
-
-    if (resumeMsg) {
-      const newSessionId = parseResumeCommand(resumeMsg.content)!;
-      sessions[group.folder] = newSessionId;
-      setSession(group.folder, newSessionId);
-      if (channel) {
-        await channel.sendMessage(chatJid, `Resumed session: ${newSessionId}`);
-      }
-      logger.info({ group: group.name, newSessionId }, 'Session resumed by user command');
-    }
-
-    saveState();
-    return true;
-  }
+  // --- Session command interception (before trigger check) ---
+  const cmdResult = await handleSessionCommand({
+    missedMessages,
+    isMainGroup,
+    groupName: group.name,
+    triggerPattern: getTriggerPattern(group.trigger),
+    timezone: TIMEZONE,
+    deps: {
+      sendMessage: (text) => channel.sendMessage(chatJid, text),
+      setTyping: (typing) => channel.setTyping?.(chatJid, typing) ?? Promise.resolve(),
+      runAgent: (prompt, onOutput) => runAgent(group, prompt, chatJid, onOutput),
+      closeStdin: () => queue.closeStdin(chatJid),
+      advanceCursor: (ts) => { lastAgentTimestamp[chatJid] = ts; saveState(); },
+      formatMessages,
+      canSenderInteract: (msg) => {
+        const hasTrigger = getTriggerPattern(group.trigger).test(msg.content.trim());
+        const reqTrigger = !isMainGroup && group.requiresTrigger !== false;
+        return isMainGroup || !reqTrigger || (hasTrigger && (
+          msg.is_from_me ||
+          isTriggerAllowed(chatJid, msg.sender, loadSenderAllowlist())
+        ));
+      },
+      setSession: (sessionId) => {
+        sessions[group.folder] = sessionId;
+        setSession(group.folder, sessionId);
+        saveState();
+      },
+    },
+  });
+  if (cmdResult.handled) return cmdResult.success;
 
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
@@ -507,42 +494,27 @@ async function startMessageLoop(): Promise<void> {
             continue;
           }
 
-          // Check for /clear or /resume before trigger check
-          const clearMsg = groupMessages.find((m) => isClearCommand(m.content));
-          const resumeMsg = groupMessages.find((m) => parseResumeCommand(m.content));
-          if (clearMsg || resumeMsg) {
-            const allPending = getMessagesSince(
-              chatJid,
-              lastAgentTimestamp[chatJid] || '',
-              ASSISTANT_NAME,
-            );
-            const latest = allPending.length > 0 ? allPending : groupMessages;
-            lastAgentTimestamp[chatJid] =
-              latest[latest.length - 1].timestamp;
+          const isMainGroup = group.isMain === true;
 
-            if (clearMsg) {
-              const oldSessionId = sessions[group.folder] || 'none';
-              delete sessions[group.folder];
-              deleteSession(group.folder);
+          // --- Session command interception (message loop) ---
+          // Scan ALL messages in the batch for a session command.
+          const loopCmdMsg = groupMessages.find(
+            (m) => extractSessionCommand(m.content, getTriggerPattern(group.trigger)) !== null,
+          );
+
+          if (loopCmdMsg) {
+            // Only close active container if the sender is authorized — otherwise an
+            // untrusted user could kill in-flight work by sending /compact (DoS).
+            if (isSessionCommandAllowed(isMainGroup, loopCmdMsg.is_from_me === true)) {
               queue.closeStdin(chatJid);
-              await channel.sendMessage(chatJid, `Context cleared. Previous session: ${oldSessionId}`);
-              logger.info({ group: group.name, oldSessionId }, 'Session cleared by user command');
             }
-
-            if (resumeMsg) {
-              const newSessionId = parseResumeCommand(resumeMsg.content)!;
-              sessions[group.folder] = newSessionId;
-              setSession(group.folder, newSessionId);
-              queue.closeStdin(chatJid);
-              await channel.sendMessage(chatJid, `Resumed session: ${newSessionId}`);
-              logger.info({ group: group.name, newSessionId }, 'Session resumed by user command');
-            }
-
-            saveState();
+            // Enqueue so processGroupMessages handles auth + cursor advancement.
+            // Don't pipe via IPC — slash commands need a fresh container with
+            // string prompt (not MessageStream) for SDK recognition.
+            queue.enqueueMessageCheck(chatJid);
             continue;
           }
 
-          const isMainGroup = group.isMain === true;
           const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
 
           // For non-main groups, only act on trigger messages.
