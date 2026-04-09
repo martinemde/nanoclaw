@@ -13,3 +13,6 @@ import './matrix.js';
 // telegram
 
 // whatsapp
+
+// emacs
+import './emacs.js';
