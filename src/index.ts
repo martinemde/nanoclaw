@@ -256,7 +256,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         triggerPattern.test(m.content.trim()) &&
         (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
     );
-    if (!hasTrigger) return true;
+    if (!hasTrigger) {
+      return true;
+    }
   }
 
   const prompt = formatMessages(missedMessages, TIMEZONE);
