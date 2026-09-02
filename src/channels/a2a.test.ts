@@ -30,7 +30,9 @@ describe('A2AChannelBridge', () => {
     expect(onInbound).toHaveBeenCalledWith(
       'a2a:gateway',
       'context-1',
-      expect.objectContaining({ content: expect.objectContaining({ text: 'test' }) }),
+      expect.objectContaining({
+        content: expect.objectContaining({ text: 'test', senderId: 'a2a:gateway' }),
+      }),
     );
   });
 

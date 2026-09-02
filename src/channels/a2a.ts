@@ -114,7 +114,7 @@ export class A2AChannelBridge {
         content: {
           text: request.text,
           sender: 'A2A client',
-          senderId: `${CHANNEL_TYPE}:${PLATFORM_ID}`,
+          senderId: PLATFORM_ID,
         },
       });
     } catch (error) {
