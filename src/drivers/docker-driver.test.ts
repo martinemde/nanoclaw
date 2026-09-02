@@ -30,8 +30,8 @@ import { log } from '../log.js';
 
 let cli: FakeCli;
 
-function driver(): DockerSessionDriver {
-  return new DockerSessionDriver({ ...FIXTURE_POLICY, cli });
+function driver(kind = 'docker'): DockerSessionDriver {
+  return new DockerSessionDriver({ ...FIXTURE_POLICY, kind, cli });
 }
 
 /** `inspect` is how the driver asks "does this exist?" — default to "no". */
@@ -467,6 +467,30 @@ describe('idempotency and adoption', () => {
     ]);
   });
 
+  it('rebuilds handles from Podman 4 JSON without Docker-only Label templates', async () => {
+    cli = new FakeCli('podman');
+    cli.responses = [
+      {
+        match: /^ps -a/,
+        output: JSON.stringify([
+          {
+            Names: ['ncl-spike-s1'],
+            State: 'running',
+            Labels: { [LABELS.group]: 'g1', [LABELS.session]: 's1' },
+          },
+        ]),
+      },
+    ];
+
+    const snapshots = await driver('podman').listSessions('spike');
+
+    expect(cli.callMatching(/^ps -a/)!.args).toContain('json');
+    expect(cli.callMatching(/^ps -a/)!.args.join(' ')).not.toContain('.Label');
+    expect(snapshots.map((s) => [s.handle.name, s.handle.key, s.phase])).toEqual([
+      ['ncl-spike-s1', { installSlug: 'spike', agentGroupId: 'g1', sessionId: 's1' }, 'running'],
+    ]);
+  });
+
   it('phases the listing itself: exited is a corpse, created is not', async () => {
     // `ps -a` sees exited and created containers; the `{{.State}}` column is
     // what lets adoption tell them apart without a status() per handle. A
@@ -500,6 +524,32 @@ describe('idempotency and adoption', () => {
 
     expect(cli.joined()).toContain('rm --force nanoclaw-v2-agent-one-1700000000000');
     expect(cli.joined().some((c) => c === 'rm --force ncl-spike-s1')).toBe(false);
+  });
+
+  it('uses Podman 4-compatible residue filters and JSON labels', async () => {
+    cli = new FakeCli('podman');
+    cli.responses = [
+      { match: /^ps -a/, output: '' },
+      {
+        match: /^ps --filter/,
+        output: JSON.stringify([
+          { Names: ['nanoclaw-v2-agent-one-1700000000000'], Labels: { [LABELS.install]: 'spike' } },
+          { Names: ['ncl-spike-s1'], Labels: { [LABELS.install]: 'spike', [LABELS.session]: 's1' } },
+        ]),
+      },
+    ];
+
+    await driver('podman').reapResidue('spike');
+
+    const staleArgs = cli.callMatching(/^ps -a/)!.args.join(' ');
+    expect(staleArgs).toContain('status=exited');
+    expect(staleArgs).toContain('status=created');
+    expect(staleArgs).not.toContain('status=dead');
+    const runningArgs = cli.callMatching(/^ps --filter/)!.args.join(' ');
+    expect(runningArgs).toContain('--format json');
+    expect(runningArgs).not.toContain('.Label');
+    expect(cli.joined()).toContain('rm --force nanoclaw-v2-agent-one-1700000000000');
+    expect(cli.joined()).not.toContain('rm --force ncl-spike-s1');
   });
 
   it('reaps install-owned networks whose containers are gone', async () => {

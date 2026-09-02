@@ -66,6 +66,12 @@ interface InstallWatch {
   attempt: number;
 }
 
+interface PodmanPsRow {
+  Names?: string[] | string;
+  State?: string;
+  Labels?: Record<string, string>;
+}
+
 export class DockerSessionDriver implements SessionDriver {
   readonly kind: string;
   readonly #cli: Cli;
@@ -185,6 +191,35 @@ export class DockerSessionDriver implements SessionDriver {
     // rides along because `ps -a` includes exited/created containers, and a
     // caller must be able to tell an adoptable session from a corpse without
     // a per-handle status() round trip.
+    if (this.kind === 'podman') {
+      let rows: PodmanPsRow[];
+      try {
+        rows = this.#podmanPs([
+          'ps',
+          '-a',
+          '--filter',
+          `label=${LABELS.install}=${installSlug}`,
+          '--filter',
+          `label=${LABELS.role}=agent`,
+        ]);
+      } catch (error) {
+        throw normalizeDockerError(error, this.kind);
+      }
+      return rows.map((row) => {
+        const name = podmanRowName(row);
+        const key: SessionKey = {
+          installSlug,
+          agentGroupId: row.Labels?.[LABELS.group] ?? '',
+          sessionId: row.Labels?.[LABELS.session] ?? '',
+        };
+        this.#remember(key);
+        return {
+          handle: new DockerHandle(key, name, this.#cli, null, this.#emit),
+          phase: dockerStatePhase(row.State ?? ''),
+        };
+      });
+    }
+
     let out: string;
     try {
       out = this.#cli.run([
@@ -328,17 +363,16 @@ export class DockerSessionDriver implements SessionDriver {
     // Containers first: an auxiliary container whose host died has no owner left
     // to close it. Only non-running ones — an adopted session's are still serving it.
     try {
+      const statusFilters =
+        this.kind === 'podman'
+          ? ['--filter', 'status=exited', '--filter', 'status=created']
+          : ['--filter', 'status=exited', '--filter', 'status=created', '--filter', 'status=dead'];
       const out = this.#cli.run([
         'ps',
         '-a',
         '--filter',
         `label=${LABELS.install}=${installSlug}`,
-        '--filter',
-        'status=exited',
-        '--filter',
-        'status=created',
-        '--filter',
-        'status=dead',
+        ...statusFilters,
         '--format',
         '{{.Names}}',
       ]);
@@ -362,20 +396,25 @@ export class DockerSessionDriver implements SessionDriver {
     // session directory. Stopping them is exactly what the old
     // `cleanupOrphans()` did to every container on every start.
     try {
-      const out = this.#cli.run([
-        'ps',
-        '--filter',
-        `label=${LABELS.install}=${installSlug}`,
-        '--format',
-        `{{.Names}}|{{.Label "${LABELS.session}"}}`,
-      ]);
-      const preSeam = out
-        .trim()
-        .split('\n')
-        .filter(Boolean)
-        .map((line) => line.split('|'))
-        .filter(([, sessionId]) => !sessionId)
-        .map(([name]) => name);
+      const preSeam =
+        this.kind === 'podman'
+          ? this.#podmanPs(['ps', '--filter', `label=${LABELS.install}=${installSlug}`])
+              .filter((row) => !row.Labels?.[LABELS.session])
+              .map(podmanRowName)
+          : this.#cli
+              .run([
+                'ps',
+                '--filter',
+                `label=${LABELS.install}=${installSlug}`,
+                '--format',
+                `{{.Names}}|{{.Label "${LABELS.session}"}}`,
+              ])
+              .trim()
+              .split('\n')
+              .filter(Boolean)
+              .map((line) => line.split('|'))
+              .filter(([, sessionId]) => !sessionId)
+              .map(([name]) => name);
       for (const name of preSeam) {
         try {
           this.#cli.run(['rm', '--force', validateRuntimeName(name, 'container')]);
@@ -415,6 +454,12 @@ export class DockerSessionDriver implements SessionDriver {
     if (removed.length > 0) log.info('Removed orphaned networks', { count: removed.length, names: removed });
   }
 
+  #podmanPs(args: string[]): PodmanPsRow[] {
+    const parsed: unknown = JSON.parse(this.#cli.run([...args, '--format', 'json']));
+    if (!Array.isArray(parsed)) throw new Error('Podman ps JSON response was not an array');
+    return parsed as PodmanPsRow[];
+  }
+
   /**
    * Name-existence alone cannot answer "is this MY session": the name is
    * key-derived, but a foreign container can wear it — another install sharing
@@ -444,6 +489,12 @@ export class DockerSessionDriver implements SessionDriver {
     });
     throw asFailureError({ kind: 'unknown', retryable: false, opaqueRef: `name-collision-${name}` });
   }
+}
+
+function podmanRowName(row: PodmanPsRow): string {
+  const name = Array.isArray(row.Names) ? row.Names[0] : row.Names;
+  if (!name) throw new Error('Podman ps JSON row has no container name');
+  return name;
 }
 
 class DockerHandle implements SessionHandle {
