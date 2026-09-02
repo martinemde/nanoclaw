@@ -33,7 +33,7 @@ import type { ChannelAdapter, ChannelDefaults, ChannelSetup, OutboundMessage } f
 import { registerChannelAdapter } from './channel-registry.js';
 
 const CHANNEL_TYPE = 'a2a';
-const PLATFORM_ID = 'gateway';
+const PLATFORM_ID = 'a2a:gateway';
 const DEFAULT_TASK_TIMEOUT_MS = 10 * 60 * 1000;
 
 const A2A_DEFAULTS: ChannelDefaults = {

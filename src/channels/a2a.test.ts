@@ -20,7 +20,7 @@ describe('A2AChannelBridge', () => {
   it('maps contextId to the NanoClaw thread and resolves from normal channel delivery', async () => {
     const bridge = new A2AChannelBridge(1_000);
     const onInbound = vi.fn(async (_platformId: string, threadId: string | null) => {
-      queueMicrotask(() => bridge.deliver('gateway', threadId, { kind: 'chat', content: { text: 'A2A_OK' } }));
+      queueMicrotask(() => bridge.deliver('a2a:gateway', threadId, { kind: 'chat', content: { text: 'A2A_OK' } }));
     });
     bridge.attach({ onInbound } as unknown as ChannelSetup);
 
@@ -28,7 +28,7 @@ describe('A2AChannelBridge', () => {
       'A2A_OK',
     );
     expect(onInbound).toHaveBeenCalledWith(
-      'gateway',
+      'a2a:gateway',
       'context-1',
       expect.objectContaining({ content: expect.objectContaining({ text: 'test' }) }),
     );
@@ -66,7 +66,7 @@ describe('A2A HTTP gateway', () => {
     const transport = new JsonRpcTransportHandler(requestHandler);
     const context = defaultServerCallContextBuilder({
       extensions: undefined,
-      user: { isAuthenticated: true, userName: 'gateway' },
+      user: { isAuthenticated: true, userName: 'a2a:gateway' },
       headers: { 'a2a-version': '1.0' },
       requestedVersion: '1.0',
       tenant: '',
