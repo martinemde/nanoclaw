@@ -6,9 +6,9 @@ import path from 'path';
 import {
   A2A_PROTOCOL_VERSION,
   AGENT_CARD_PATH,
+  AgentCard,
   Role,
   TaskState,
-  type AgentCard,
   type Message,
   type Part,
   type Task,
@@ -22,7 +22,7 @@ import {
   type RequestContext,
   type TaskStore,
 } from '@a2a-js/sdk/server';
-import { agentCardHandler, jsonRpcHandler } from '@a2a-js/sdk/server/express';
+import { jsonRpcHandler } from '@a2a-js/sdk/server/express';
 import express, { type Express, type RequestHandler } from 'express';
 
 import { FileTaskStore } from '../a2a/file-task-store.js';
@@ -253,7 +253,18 @@ export function createA2AHttpApp(options: {
 
   app.disable('x-powered-by');
   app.get('/healthz', (_request, response) => response.status(200).json({ ok: true }));
-  app.use(`/${AGENT_CARD_PATH}`, agentCardHandler({ agentCardProvider: handler, cache: { maxAge: 60 } }));
+  // The SDK's Express helper stringifies its in-memory protobuf object. That
+  // leaks `$case` onto the wire instead of emitting protobuf JSON, and the SDK
+  // client then normalizes the advertised HTTP bearer scheme to `undefined`.
+  app.get(`/${AGENT_CARD_PATH}`, (_request, response, next) => {
+    void handler
+      .getAgentCard()
+      .then((card) => {
+        response.setHeader('Cache-Control', 'public, max-age=60');
+        response.status(200).json(AgentCard.toJSON(card));
+      })
+      .catch(next);
+  });
   app.use('/a2a', bearerAuth(options.bearerToken));
   app.use(
     '/a2a',

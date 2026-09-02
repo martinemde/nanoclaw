@@ -43,6 +43,7 @@ const { backfillNewSession, BACKFILL_LIMIT } = await import('./backfill.js');
 const AG = { id: 'ag-1', name: 'Pete', folder: 'pete', agent_provider: null, created_at: '' } as never;
 const DM_MG = { id: 'mg-dm', channel_type: 'slack', platform_id: 'slack:D1', is_group: 0 } as never;
 const ROOM_MG = { id: 'mg-room', channel_type: 'slack', platform_id: 'slack:C1', is_group: 1 } as never;
+const A2A_MG = { id: 'mg-a2a', channel_type: 'a2a', platform_id: 'a2a:gateway', is_group: 0 } as never;
 const NEW_SESSION = {
   id: 'sess-new',
   agent_group_id: 'ag-1',
@@ -100,6 +101,16 @@ describe('backfillNewSession', () => {
     siblingSessions = [];
     await backfillNewSession(AG, NEW_SESSION, DM_MG);
     expect(written).toHaveLength(0);
+  });
+
+  it('keeps A2A task contexts isolated from sibling task history', async () => {
+    siblingSessions = [{ id: 'sess-old-a2a', status: 'active', messaging_group_id: 'mg-a2a' }];
+    inboundRows = [{ timestamp: '2026-08-01T19:10:00Z', content: chat('an older protocol task') }];
+
+    await backfillNewSession(AG, { ...(NEW_SESSION as object), messaging_group_id: 'mg-a2a' } as never, A2A_MG);
+
+    expect(written).toHaveLength(0);
+    expect(inboundSql).toHaveLength(0);
   });
 
   it('seeds group-surface sessions with the channel timeline: channel-timeline surface + channel label', async () => {

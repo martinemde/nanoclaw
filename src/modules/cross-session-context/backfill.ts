@@ -10,9 +10,11 @@
  * audience, DM or group alike, so the same privacy argument as the sibling
  * fan applies.
  *
- * Bounded: last BACKFILL_LIMIT rows across all siblings, echo truncation as
- * usual. Rows are trigger=0 session-echo rows written BEFORE the triggering
- * message (lower seq → the formatter renders them first, as ambient context).
+ * A2A contexts are independent protocol tasks, not chat threads, so they never
+ * inherit another task's timeline. Chat backfill is bounded to the last
+ * BACKFILL_LIMIT rows across all siblings with normal echo truncation. Rows are
+ * trigger=0 session-echo rows written BEFORE the triggering message (lower seq
+ * → the formatter renders them first, as ambient context).
  */
 import { getSessionsByAgentGroup, isTaskThread } from '../../db/sessions.js';
 import { log } from '../../log.js';
@@ -103,6 +105,7 @@ async function collectSiblingTopLevel(
  */
 export async function backfillNewSession(agentGroup: AgentGroup, session: Session, mg: MessagingGroup): Promise<void> {
   try {
+    if (mg.channel_type === 'a2a') return;
     if (session.thread_id !== null && isTaskThread(session.thread_id)) return;
 
     const siblings = (await getSessionsByAgentGroup(agentGroup.id)).filter(

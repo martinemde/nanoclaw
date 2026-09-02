@@ -2,13 +2,13 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { Task, TaskState } from '@a2a-js/sdk';
+import { AgentCard, Task, TaskState } from '@a2a-js/sdk';
 import { JsonRpcTransportHandler, defaultServerCallContextBuilder } from '@a2a-js/sdk/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { FileTaskStore } from '../a2a/file-task-store.js';
 import type { ChannelSetup } from './adapter.js';
-import { A2AChannelBridge, createA2ARequestHandler, isAuthorizedBearer } from './a2a.js';
+import { A2AChannelBridge, createA2AHttpApp, createA2ARequestHandler, isAuthorizedBearer } from './a2a.js';
 
 const roots: string[] = [];
 
@@ -54,6 +54,33 @@ describe('A2A HTTP gateway', () => {
     expect(isAuthorizedBearer('Bearer test-token', 'test-token')).toBe(true);
     expect(isAuthorizedBearer('Bearer wrong-token', 'test-token')).toBe(false);
     expect(isAuthorizedBearer('', 'test-token')).toBe(false);
+  });
+
+  it('publishes a protobuf-JSON Agent Card with HTTP bearer authentication', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-a2a-card-'));
+    roots.push(root);
+    const app = createA2AHttpApp({
+      publicUrl: 'http://127.0.0.1/a2a',
+      bearerToken: 'test-token',
+      taskStore: new FileTaskStore(root),
+      dispatch: async () => 'unused',
+    });
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('test server has no TCP address');
+      const response = await fetch(`http://127.0.0.1:${address.port}/.well-known/agent-card.json`);
+      const raw = await response.json();
+      const card = AgentCard.fromJSON(raw);
+
+      expect(response.status).toBe(200);
+      expect(raw).toHaveProperty('securitySchemes.bearer.httpAuthSecurityScheme.scheme', 'bearer');
+      expect(card.securitySchemes.bearer?.scheme?.$case).toBe('httpAuthSecurityScheme');
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    }
   });
 
   it('runs an official SendMessage request and persists the completed task', async () => {
