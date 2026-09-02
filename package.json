@@ -33,6 +33,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@a2a-js/sdk": "1.1.0",
     "@beeper/chat-adapter-matrix": "0.2.0",
     "@clack/core": "^1.2.0",
     "@clack/prompts": "^1.2.0",
@@ -40,12 +41,14 @@
     "better-sqlite3": "13.0.3",
     "chat": "4.29.0",
     "cron-parser": "5.5.0",
+    "express": "5.1.0",
     "kleur": "^4.1.5",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",
     "@types/better-sqlite3": "^7.6.12",
+    "@types/express": "5.0.3",
     "@types/node": "^22.10.0",
     "eslint": "^9.35.0",
     "eslint-plugin-no-catch-all": "^1.1.0",

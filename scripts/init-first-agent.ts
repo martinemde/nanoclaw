@@ -25,7 +25,9 @@
  *     --display-name "Alex" \
  *     [--agent-name "Andy"] \
  *     [--agent-group-id <id>] \       # wire an agent setup already created
+ *     [--agent-group <folder>] \       # same, using the stable group folder
  *     [--welcome "System instruction: ..."] \
+ *     [--no-welcome] \                 # wire only; do not contact the running service
  *     [--role owner|admin|member] \  # default: owner
  *     [--engage-pattern "."] \       # explicit DM engage regex override
  *     [--instance telegram-mega]     # adapter instance registry key; default = the channel's default instance
@@ -72,7 +74,9 @@ interface Args {
   displayName: string;
   agentName: string;
   agentGroupId?: string;
+  agentGroup?: string;
   welcome: string;
+  noWelcome: boolean;
   role: Role;
   /** Explicit engage regex for the DM wiring; omitted = channel declaration / '.'. */
   engagePattern?: string;
@@ -131,6 +135,10 @@ function parseArgs(argv: string[]): Args {
         out.agentGroupId = val;
         i++;
         break;
+      case '--agent-group':
+        out.agentGroup = val;
+        i++;
+        break;
       case '--welcome':
         out.welcome = val;
         i++;
@@ -150,6 +158,9 @@ function parseArgs(argv: string[]): Args {
         }
         out.instance = val;
         i++;
+        break;
+      case '--no-welcome':
+        out.noWelcome = true;
         break;
       case '--role': {
         const raw = (val ?? '').toLowerCase();
@@ -173,6 +184,10 @@ function parseArgs(argv: string[]): Args {
     console.error('See scripts/init-first-agent.ts header for usage.');
     process.exit(2);
   }
+  if (out.agentGroupId && out.agentGroup) {
+    console.error('Use either --agent-group-id or --agent-group, not both.');
+    process.exit(2);
+  }
 
   return {
     channel: out.channel!,
@@ -181,7 +196,9 @@ function parseArgs(argv: string[]): Args {
     displayName: out.displayName!,
     agentName: out.agentName?.trim() || out.displayName!,
     agentGroupId: out.agentGroupId?.trim() || undefined,
+    agentGroup: out.agentGroup?.trim() || undefined,
     welcome: out.welcome?.trim() || defaultWelcome(out.channel!),
+    noWelcome: out.noWelcome ?? false,
     role: out.role ?? DEFAULT_ROLE,
     engagePattern: out.engagePattern?.trim() || undefined,
     instance: out.instance,
@@ -278,6 +295,12 @@ async function main(): Promise<void> {
   if (args.agentGroupId) {
     const existing = await getAgentGroup(args.agentGroupId);
     if (!existing) throw new Error(`Agent group not found: ${args.agentGroupId}`);
+    ag = existing;
+    folder = existing.folder;
+    console.log(`Using agent group: ${ag.id} (${folder})`);
+  } else if (args.agentGroup) {
+    const existing = await getAgentGroupByFolder(args.agentGroup);
+    if (!existing) throw new Error(`Agent group not found: ${args.agentGroup}`);
     ag = existing;
     folder = existing.folder;
     console.log(`Using agent group: ${ag.id} (${folder})`);
@@ -388,10 +411,12 @@ async function main(): Promise<void> {
   // writes the message into the DM session's inbound.db, and wakes the
   // container synchronously — no sweep wait. The paired user's identity is
   // passed so the sender resolver sees the real owner, not cli:local.
-  await sendWelcomeViaCliSocket(dmMg, args.welcome, {
-    senderId: userId,
-    sender: args.displayName,
-  });
+  if (!args.noWelcome) {
+    await sendWelcomeViaCliSocket(dmMg, args.welcome, {
+      senderId: userId,
+      sender: args.displayName,
+    });
+  }
 
   const roleLabel =
     args.role === 'owner' ? 'owner (global)' : args.role === 'admin' ? `admin (scoped to ${ag.id})` : 'member';
@@ -403,7 +428,7 @@ async function main(): Promise<void> {
   console.log(`  agent:   ${ag.name} [${ag.id}] @ groups/${folder}`);
   console.log(`  channel: ${args.channel} ${dmMg.platform_id}`);
   console.log('');
-  console.log('Welcome DM queued — the agent will greet you shortly.');
+  console.log(args.noWelcome ? 'Welcome skipped.' : 'Welcome DM queued — the agent will greet you shortly.');
 }
 
 /**

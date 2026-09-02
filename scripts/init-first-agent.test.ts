@@ -35,6 +35,12 @@ interface MgRow {
   instance: string;
 }
 
+interface WiringRow {
+  channel_type: string;
+  platform_id: string;
+  folder: string;
+}
+
 describe('scripts/init-first-agent.ts --instance', () => {
   let cwd: string;
   let server: net.Server;
@@ -99,6 +105,23 @@ describe('scripts/init-first-agent.ts --instance', () => {
     }
   }
 
+  function wirings(): WiringRow[] {
+    const db = new Database(path.join(cwd, 'data', 'v2.db'), { readonly: true });
+    try {
+      return db
+        .prepare(
+          `SELECT mg.channel_type, mg.platform_id, ag.folder
+             FROM messaging_group_agents mga
+             JOIN messaging_groups mg ON mg.id = mga.messaging_group_id
+             JOIN agent_groups ag ON ag.id = mga.agent_group_id
+            ORDER BY mg.channel_type`,
+        )
+        .all() as WiringRow[];
+    } finally {
+      db.close();
+    }
+  }
+
   it('creates the DM row for the named instance and addresses the welcome to it', async () => {
     const w = welcome();
     const r = await run(['--instance', 'telegram-mega']);
@@ -149,4 +172,30 @@ describe('scripts/init-first-agent.ts --instance', () => {
     expect(r.stderr).toContain('--instance must be a URL-safe adapter registry key');
     expect(fs.existsSync(path.join(cwd, 'data', 'v2.db'))).toBe(false);
   }, 60_000);
+
+  it('wires a new channel to an existing group by folder without sending a welcome', async () => {
+    const firstWelcome = welcome();
+    expect((await run([])).status).toBe(0);
+    await firstWelcome;
+
+    const r = await run([
+      '--channel',
+      'a2a',
+      '--user-id',
+      'a2a:gateway',
+      '--platform-id',
+      'a2a:gateway',
+      '--display-name',
+      'A2A Gateway',
+      '--agent-group',
+      'dm-with-amit',
+      '--no-welcome',
+    ]);
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(wirings()).toEqual([
+      { channel_type: 'a2a', platform_id: 'a2a:gateway', folder: 'dm-with-amit' },
+      { channel_type: 'telegram', platform_id: 'telegram:42', folder: 'dm-with-amit' },
+    ]);
+  }, 90_000);
 });
