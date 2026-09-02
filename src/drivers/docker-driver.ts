@@ -49,6 +49,10 @@ import {
 
 export interface DockerDriverOptions extends MountPolicy {
   cli?: Cli;
+  /** Runtime identity exposed through the session-driver seam. */
+  kind?: string;
+  /** Runtime-specific create flags that are not part of SessionSpec. */
+  runtimeArgsFor?: (spec: SessionSpec) => string[];
   /** Docker network the session's containers attach to, resolved by the overlay. */
   networkArgsFor?: (spec: SessionSpec) => string[];
 }
@@ -63,7 +67,7 @@ interface InstallWatch {
 }
 
 export class DockerSessionDriver implements SessionDriver {
-  readonly kind = 'docker' as const;
+  readonly kind: string;
   readonly #cli: Cli;
   readonly #policy: MountPolicy;
   /** One `docker events` subscription per install slug — never per session. */
@@ -77,6 +81,7 @@ export class DockerSessionDriver implements SessionDriver {
   readonly #knownKeys = new Map<string, Map<string, SessionKey>>();
 
   constructor(private readonly opts: DockerDriverOptions) {
+    this.kind = opts.kind ?? 'docker';
     this.#cli = opts.cli ?? realCli('docker');
     this.#policy = opts;
   }
@@ -115,7 +120,7 @@ export class DockerSessionDriver implements SessionDriver {
       // here. Composition gates on capabilities().auxiliaryContainers, so this
       // is the backstop for a composer that did not.
       throw specInvalid(
-        `docker driver does not manage container role '${extra[0].role}'; ` +
+        `${this.kind} driver does not manage container role '${extra[0].role}'; ` +
           `auxiliary containers require a driver with capabilities().auxiliaryContainers`,
       );
     }
@@ -147,6 +152,7 @@ export class DockerSessionDriver implements SessionDriver {
     args.push(...envArgs(agent.env));
     args.push(...envArgs(agent.contributedEnv ?? {}));
     args.push(...mountArgs(agent.mounts));
+    args.push(...(this.opts.runtimeArgsFor?.(spec) ?? []));
     // Network topology is driver-private: injected at registration (see
     // `drivers/index.ts`), never carried on the spec. Argv-shaped input has no
     // remaining channel through composition.
@@ -169,7 +175,7 @@ export class DockerSessionDriver implements SessionDriver {
       } catch {
         /* prepare is atomic: allocate all or leave nothing */
       }
-      throw normalizeDockerError(error);
+      throw normalizeDockerError(error, this.kind);
     }
     return new DockerHandle(spec.key, name, this.#cli, spec, this.#emit);
   }
@@ -192,7 +198,7 @@ export class DockerSessionDriver implements SessionDriver {
         `{{.Names}}|{{.State}}|{{.Label "${LABELS.group}"}}|{{.Label "${LABELS.session}"}}`,
       ]);
     } catch (error) {
-      throw normalizeDockerError(error);
+      throw normalizeDockerError(error, this.kind);
     }
     return out
       .trim()
@@ -539,10 +545,10 @@ class DockerHandle implements SessionHandle {
     }
   }
 
-  /** `docker exec` against this session's container — see `SessionExecSpec`. */
+  /** Runtime exec against this session's container — see `SessionExecSpec`. */
   execSpec(command: string[]): SessionExecSpec {
     return {
-      bin: 'docker',
+      bin: this.cli.bin,
       argsTty: ['exec', '-it', this.name, ...command],
       argsPlain: ['exec', '-i', this.name, ...command],
     };
@@ -571,6 +577,8 @@ export function dockerStatePhase(state: string): SessionPhase {
 interface DockerEventDoc {
   Action?: string;
   Actor?: { Attributes?: Record<string, string> };
+  Status?: string;
+  Attributes?: Record<string, string>;
 }
 
 /**
@@ -580,13 +588,13 @@ interface DockerEventDoc {
  */
 export function dockerEventToSessionEvent(doc: unknown, installSlug: string): SessionEvent | null {
   const event = doc as DockerEventDoc;
-  const attrs = event.Actor?.Attributes ?? {};
+  const attrs = event.Actor?.Attributes ?? event.Attributes ?? {};
   const agentGroupId = attrs[LABELS.group];
   const sessionId = attrs[LABELS.session];
   if (!agentGroupId || !sessionId) return null;
-  const action = event.Action ?? '';
+  const action = event.Action ?? event.Status ?? '';
   const kind =
-    action === 'die' || action === 'destroy'
+    action === 'die' || action === 'died' || action === 'destroy' || action === 'remove' || action === 'exited'
       ? ('terminal' as const)
       : action === 'create' || action === 'start' || action === 'restart'
         ? ('phase' as const)
@@ -671,16 +679,16 @@ export function labelArgs(labels: Record<string, string>): string[] {
   return Object.entries(labels).flatMap(([k, v]) => ['--label', `${k}=${v}`]);
 }
 
-export function normalizeDockerError(error: unknown): Error & SessionFailure {
+export function normalizeDockerError(error: unknown, runtime = 'docker'): Error & SessionFailure {
   const msg = error instanceof Error ? error.message : String(error);
   const failure: SessionFailure = /manifest unknown|pull access denied|not found: manifest|No such image/i.test(msg)
     ? { kind: 'image-unavailable', retryable: true }
-    : /Cannot connect to the Docker daemon|daemon is not running/i.test(msg)
+    : /Cannot connect to the Docker daemon|daemon is not running|cannot connect to Podman|podman socket/i.test(msg)
       ? { kind: 'runtime-unavailable', retryable: true }
       : /no space left|cannot allocate memory/i.test(msg)
         ? { kind: 'resources-exhausted', retryable: true }
         : // Raw runtime errors never cross the seam.
-          { kind: 'unknown', retryable: false, opaqueRef: `docker-${Date.now()}` };
+          { kind: 'unknown', retryable: false, opaqueRef: `${runtime}-${Date.now()}` };
   return asFailureError(failure);
 }
 
@@ -709,13 +717,14 @@ export function ensureDockerRunning(cli: Cli = realCli('docker')): void {
     log.debug('Container runtime already running');
   } catch (err) {
     log.error('Failed to reach container runtime', { err });
+    const boxLine = (text: string): void => console.error(`║  ${text.padEnd(62)}║`);
     console.error('\n╔════════════════════════════════════════════════════════════════╗');
-    console.error('║  FATAL: Container runtime failed to start                      ║');
-    console.error('║                                                                ║');
-    console.error('║  Agents cannot run without a container runtime. To fix:        ║');
-    console.error('║  1. Ensure Docker is installed and running                     ║');
-    console.error('║  2. Run: docker info                                           ║');
-    console.error('║  3. Restart NanoClaw                                           ║');
+    boxLine('FATAL: Container runtime failed to start');
+    boxLine('');
+    boxLine('Agents cannot run without a container runtime. To fix:');
+    boxLine(`1. Ensure ${cli.bin} is installed and running`);
+    boxLine(`2. Run: ${cli.bin} info`);
+    boxLine('3. Restart NanoClaw');
     console.error('╚════════════════════════════════════════════════════════════════╝\n');
     throw new Error('Container runtime is required but failed to start', { cause: err });
   }

@@ -48,6 +48,18 @@ beforeEach(() => {
 });
 
 describe('spec realization', () => {
+  it('uses the injected runtime for session exec', async () => {
+    cli = new FakeCli('podman');
+    cli.responses = [{ match: /^inspect /, throws: new Error('No such object') }];
+    const handle = await new DockerSessionDriver({ ...FIXTURE_POLICY, kind: 'podman', cli }).prepare(fixtureSpec());
+
+    expect(handle.execSpec(['true'])).toEqual({
+      bin: 'podman',
+      argsTty: ['exec', '-it', 'ncl-spike-s1', 'true'],
+      argsPlain: ['exec', '-i', 'ncl-spike-s1', 'true'],
+    });
+  });
+
   it('emits the agent container with its image, entrypoint split and canonical labels', async () => {
     await driver().prepare(fixtureSpec());
     const args = createArgs();
@@ -648,6 +660,18 @@ describe('watchSessions', () => {
 });
 
 describe('dockerEventToSessionEvent', () => {
+  it('accepts Podman event fields and terminal status names', () => {
+    expect(
+      dockerEventToSessionEvent(
+        {
+          Status: 'died',
+          Attributes: { [LABELS.group]: 'g1', [LABELS.session]: 's1' },
+        },
+        'spike',
+      ),
+    ).toEqual({ key: { installSlug: 'spike', agentGroupId: 'g1', sessionId: 's1' }, kind: 'terminal' });
+  });
+
   it('drops label-less documents and unknown actions — hints may drop', () => {
     expect(dockerEventToSessionEvent({ Action: 'die', Actor: { Attributes: { name: 'x' } } }, 'spike')).toBeNull();
     expect(

@@ -12,5 +12,11 @@
  * egress lockdown network.
  */
 
-/** The container runtime binary name. */
-export const CONTAINER_RUNTIME_BIN = 'docker';
+/**
+ * The container runtime binary name for image and network operations.
+ *
+ * Session lifecycle has its own driver selection. Deployments using a
+ * compatible runtime must set this alongside NANOCLAW_RUNTIME_DRIVER so image
+ * builds and egress-network operations use the same engine.
+ */
+export const CONTAINER_RUNTIME_BIN = process.env.CONTAINER_RUNTIME?.trim() || 'docker';
