@@ -220,7 +220,13 @@ describe('origin metadata (from= attribute)', () => {
       .run(name, name, channelType, platformId);
   }
 
-  function insertWithRouting(id: string, kind: string, content: object, channelType: string | null, platformId: string | null): void {
+  function insertWithRouting(
+    id: string,
+    kind: string,
+    content: object,
+    channelType: string | null,
+    platformId: string | null,
+  ): void {
     getInboundDb()
       .prepare(
         `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, content)
@@ -459,6 +465,13 @@ describe('error result with no <message> envelope', () => {
   });
 
   it('still nudges (and does not deliver) a normal unwrapped result', async () => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES ('a2a-gateway', 'A2A Gateway', 'channel', 'discord', 'chan-1', NULL),
+                ('martin', 'Martin', 'channel', 'matrix', 'matrix:martin', NULL)`,
+      )
+      .run();
     const { query, pushes } = makeResultQuery({ type: 'result', text: 'bare text, no envelope' });
 
     await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
@@ -466,6 +479,10 @@ describe('error result with no <message> envelope', () => {
     expect(getUndeliveredMessages()).toHaveLength(0);
     expect(pushes).toHaveLength(1);
     expect(pushes[0]).toContain('was not delivered');
+    expect(pushes[0]).toContain(
+      'This turn came from a2a-gateway; re-send the response to that destination as <message to="a2a-gateway">',
+    );
+    expect(pushes[0]).not.toContain('Your destinations:');
   });
 });
 
@@ -484,9 +501,9 @@ const TASK_ROUTING = {
 
 function taskLogRows(): Array<{ text: string }> {
   return (
-    getOutboundDb()
-      .prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq")
-      .all() as Array<{ content: string }>
+    getOutboundDb().prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq").all() as Array<{
+      content: string;
+    }>
   ).map((r) => JSON.parse(r.content) as { text: string });
 }
 

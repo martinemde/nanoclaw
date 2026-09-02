@@ -1,4 +1,4 @@
-import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
+import { findByName, findByRouting, getAllDestinations, type DestinationEntry } from './destinations.js';
 import {
   getPendingMessages,
   markProcessing,
@@ -608,11 +608,14 @@ export async function processQuery(
               unwrappedNudged = true;
               const destinations = getAllDestinations();
               const names = destinations.map((d) => d.name).join(', ');
+              const origin = findByRouting(routing.channelType, routing.platformId);
+              const destinationHint = origin
+                ? `This turn came from ${origin.name}; re-send the response to that destination as <message to="${origin.name}">...</message>.`
+                : `Your destinations: ${names}. Please re-send your response with the correct wrapping.`;
               query.push(
                 `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
                   `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
-                  `Your destinations: ${names}. ` +
-                  `Please re-send your response with the correct wrapping.</system>`,
+                  `${destinationHint}</system>`,
               );
             }
             if (willRetryTaskBlocks) {
