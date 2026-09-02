@@ -82,7 +82,7 @@ describe('A2A HTTP gateway', () => {
     expect(task.contextId).toBe('context-1');
     expect(task.artifacts?.[0]?.parts[0]?.content).toEqual({
       $case: 'text',
-      value: 'reply:context-1:run this',
+      value: 'reply:context-1:run this\n{"extractId":"extract-1","kind":"information","fields":{"topic":"AI"}}',
     });
 
     const saved = await taskStore.load(task.id, context);
@@ -101,7 +101,10 @@ function sendMessageRequest(): Record<string, unknown> {
         messageId: 'message-1',
         contextId: 'context-1',
         role: 'ROLE_USER',
-        parts: [{ text: 'run this' }],
+        parts: [
+          { text: 'run this' },
+          { data: { extractId: 'extract-1', kind: 'information', fields: { topic: 'AI' } } },
+        ],
       },
       configuration: { blocking: true, acceptedOutputModes: ['text/plain'] },
     },

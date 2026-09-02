@@ -186,7 +186,7 @@ export class NanoClawA2AExecutor implements AgentExecutor {
     );
 
     try {
-      const text = extractInboundText(userMessage);
+      const text = extractInboundContent(userMessage);
       const response = await this.dispatch({ contextId, messageId: userMessage.messageId, text });
       const responseMessage = agentMessage(taskId, contextId, response);
       eventBus.publish(
@@ -353,7 +353,7 @@ function createAgentCard(publicUrl: string): AgentCard {
       },
     },
     securityRequirements: [{ schemes: { bearer: { list: [] } } }],
-    defaultInputModes: ['text/plain'],
+    defaultInputModes: ['text/plain', 'application/json'],
     defaultOutputModes: ['text/plain'],
     skills: [
       {
@@ -362,7 +362,7 @@ function createAgentCard(publicUrl: string): AgentCard {
         description: 'Run a text task in an isolated NanoClaw session and return the response as an artifact.',
         tags: ['assistant', 'task', 'nanoclaw'],
         examples: ['Summarize the current project status.'],
-        inputModes: ['text/plain'],
+        inputModes: ['text/plain', 'application/json'],
         outputModes: ['text/plain'],
         securityRequirements: [{ schemes: { bearer: { list: [] } } }],
       },
@@ -389,13 +389,16 @@ export function isAuthorizedBearer(authorization: string, expectedToken: string)
   return supplied.length === expected.length && timingSafeEqual(supplied, expected);
 }
 
-function extractInboundText(message: Message): string {
+function extractInboundContent(message: Message): string {
   const text = message.parts
-    .filter((part) => part.content?.$case === 'text')
-    .map((part) => (part.content?.$case === 'text' ? part.content.value : ''))
+    .flatMap((part) => {
+      if (part.content?.$case === 'text') return [part.content.value];
+      if (part.content?.$case === 'data') return [JSON.stringify(part.content.value)];
+      return [];
+    })
     .join('\n')
     .trim();
-  if (!text) throw new Error('NanoClaw A2A currently accepts text parts only');
+  if (!text) throw new Error('NanoClaw A2A requires a text or data part');
   return text;
 }
 
