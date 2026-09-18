@@ -34,7 +34,6 @@
   },
   "dependencies": {
     "@a2a-js/sdk": "1.1.0",
-    "@beeper/chat-adapter-matrix": "0.2.0",
     "@clack/core": "^1.2.0",
     "@clack/prompts": "^1.2.0",
     "@onecli-sh/sdk": "2.2.1",
@@ -43,6 +42,7 @@
     "cron-parser": "5.5.0",
     "express": "5.1.0",
     "kleur": "^4.1.5",
+    "matrix-bot-sdk": "0.8.0",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
@@ -64,8 +64,8 @@
     "node": ">=22"
   },
   "pnpm": {
-    "patchedDependencies": {
-      "@beeper/chat-adapter-matrix@0.2.0": "patches/@beeper__chat-adapter-matrix@0.2.0.patch"
-    }
+    "onlyBuiltDependencies": [
+      "@matrix-org/matrix-sdk-crypto-nodejs"
+    ]
   }
 }

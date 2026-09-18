@@ -1,32 +1,28 @@
 /**
- * Matrix channel adapter (v2) — uses Chat SDK bridge.
- * Self-registers on import.
+ * Native Matrix channel adapter with a persistent SQLite-backed E2EE store.
  *
- * Supports two auth methods (resolved by the adapter from env):
- *   - Access token: MATRIX_ACCESS_TOKEN + MATRIX_USER_ID
- *   - Password:     MATRIX_USERNAME + MATRIX_PASSWORD (+ optional MATRIX_USER_ID)
- *
- * Optional env vars:
- *   MATRIX_BOT_USERNAME         — display name for the bot (default: "bot")
- *   MATRIX_INVITE_AUTOJOIN      — "true" to auto-accept room invites
- *   MATRIX_INVITE_AUTOJOIN_ALLOWLIST — comma-separated user IDs allowed to invite
- *   MATRIX_RECOVERY_KEY         — enable E2EE cross-signing
- *   MATRIX_DEVICE_ID            — stable device ID across restarts
+ * matrix-js-sdk's Node crypto store is intentionally ephemeral. Reusing an
+ * access token after a restart therefore reused the Matrix device ID with a
+ * new Olm identity, producing replies that clients could not decrypt until
+ * key sharing caught up. matrix-bot-sdk persists the Rust crypto machine and
+ * keeps the device identity stable across restarts.
  */
-import { createMatrixAdapter } from '@beeper/chat-adapter-matrix';
+import fs from 'fs';
+import path from 'path';
 
-import { log } from '../log.js';
+import { DATA_DIR } from '../config.js';
 import { readEnvFile } from '../env.js';
-import type { ChannelDefaults } from './adapter.js';
-import { createChatSdkBridge } from './chat-sdk-bridge.js';
+import { log } from '../log.js';
+import type {
+  ChannelAdapter,
+  ChannelDefaults,
+  ChannelSetup,
+  ConversationInfo,
+  OutboundMessage,
+  ResolvedConversation,
+} from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
 
-/**
- * Assumes a dedicated bot account on a homeserver (the common install).
- * Non-threaded at the bridge level, so group engagement is 'mention', never
- * sticky. Personal-account installs should edit their copy to dm 'strict' —
- * install-wide changes live in this declaration by design.
- */
 const MATRIX_DEFAULTS: ChannelDefaults = {
   dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'request_approval' },
   group: { engageMode: 'mention', threads: false, unknownSenderPolicy: 'request_approval' },
@@ -36,190 +32,342 @@ const MATRIX_DEFAULTS: ChannelDefaults = {
 const ENV_KEYS = [
   'MATRIX_BASE_URL',
   'MATRIX_ACCESS_TOKEN',
-  'MATRIX_USERNAME',
-  'MATRIX_PASSWORD',
   'MATRIX_USER_ID',
   'MATRIX_BOT_USERNAME',
-  'MATRIX_DEVICE_ID',
-  'MATRIX_RECOVERY_KEY',
   'MATRIX_INVITE_AUTOJOIN',
   'MATRIX_INVITE_AUTOJOIN_ALLOWLIST',
 ] as const;
 
-/**
- * Wrap the Matrix adapter so DM conversations are identified by user handle
- * across the whole system, not by ephemeral room IDs.
- *
- * Matrix DMs live in rooms (e.g. "!abc:server"), but NanoClaw identifies
- * channels by platform_id. Using a user handle as platform_id means both
- * the user and the messaging group reference the same stable identifier.
- *
- * Two directions to bridge:
- *   - Outbound: delivery passes "matrix:@user:server" → resolve to room via openDM
- *   - Inbound: adapter emits "matrix:!room:server" → rewrite to user handle
- *     so the router finds the existing messaging group instead of creating
- *     a new one.
- *
- * Both resolutions are cached for the process lifetime.
- */
-function wrapWithDmResolution(adapter: ReturnType<typeof createMatrixAdapter>): typeof adapter {
-  const origPostMessage = adapter.postMessage.bind(adapter);
-  const origStartTyping = adapter.startTyping.bind(adapter);
-  const origChannelIdFromThreadId = adapter.channelIdFromThreadId.bind(adapter);
+interface MatrixEvent {
+  event_id?: string;
+  sender?: string;
+  origin_server_ts?: number;
+  content?: {
+    body?: string;
+    msgtype?: string;
+    'm.mentions'?: { user_ids?: string[] };
+    'm.new_content'?: { body?: string; msgtype?: string };
+  };
+}
 
-  // roomId → user handle, used to rewrite inbound channel IDs.
-  const roomToUserCache = new Map<string, string>();
+interface MatrixClientLike {
+  on(event: string, listener: (...args: unknown[]) => unknown): unknown;
+  getUserId(): Promise<string>;
+  start(): Promise<unknown>;
+  stop(): void;
+  joinRoom(roomId: string): Promise<unknown>;
+  getJoinedRooms(): Promise<string[]>;
+  getJoinedRoomMembers(roomId: string): Promise<string[]>;
+  getJoinedRoomMembersWithProfiles(
+    roomId: string,
+  ): Promise<Record<string, { display_name?: string; avatar_url?: string }>>;
+  sendMessage(roomId: string, content: Record<string, unknown>): Promise<string>;
+  sendEvent(roomId: string, eventType: string, content: Record<string, unknown>): Promise<string>;
+  setTyping(roomId: string, typing: boolean, timeout?: number): Promise<unknown>;
+  dms: {
+    isDm(roomId: string): boolean;
+    getOrCreateDm(userId: string): Promise<string>;
+  };
+  cryptoStore?: {
+    storagePath: string;
+    getDeviceId(): Promise<string>;
+    setDeviceId(deviceId: string): Promise<void>;
+  };
+}
 
-  function isUserHandle(threadId: string): boolean {
-    try {
-      const { roomID } = adapter.decodeThreadId(threadId);
-      return !roomID.startsWith('!');
-    } catch {
-      return true;
-    }
+export interface MatrixClientConfig {
+  baseUrl: string;
+  accessToken: string;
+  userId: string;
+  stateDir: string;
+}
+
+export type MatrixClientFactory = (config: MatrixClientConfig) => Promise<MatrixClientLike>;
+
+function lockDown(pathname: string, mode: number): void {
+  try {
+    fs.chmodSync(pathname, mode);
+  } catch (err) {
+    log.warn('Matrix: could not restrict persistent crypto state permissions', { pathname, err });
+  }
+}
+
+/** Construct the real client lazily so registration stays side-effect free. */
+export async function createPersistentMatrixClient(config: MatrixClientConfig): Promise<MatrixClientLike> {
+  const { MatrixClient, RustSdkCryptoStorageProvider, SimpleFsStorageProvider } = await import('matrix-bot-sdk');
+  const stateDir = path.resolve(config.stateDir);
+  const cryptoDir = path.join(stateDir, 'crypto');
+  const syncStateFile = path.join(stateDir, 'sync.json');
+
+  fs.mkdirSync(cryptoDir, { recursive: true, mode: 0o700 });
+  lockDown(stateDir, 0o700);
+  lockDown(cryptoDir, 0o700);
+
+  const storage = new SimpleFsStorageProvider(syncStateFile);
+  lockDown(syncStateFile, 0o600);
+  // StoreType.Sqlite is a const enum erased at runtime; SQLite is its only
+  // value in the Rust bindings and is represented by zero.
+  const crypto = new RustSdkCryptoStorageProvider(cryptoDir, 0);
+  lockDown(path.join(cryptoDir, 'bot-sdk.json'), 0o600);
+
+  return new MatrixClient(config.baseUrl, config.accessToken, storage, crypto) as unknown as MatrixClientLike;
+}
+
+function unprefix(value: string): string {
+  return value.startsWith('matrix:') ? value.slice('matrix:'.length) : value;
+}
+
+function outboundText(message: OutboundMessage): string | null {
+  const content = message.content;
+  if (typeof content === 'string') return content;
+  if (!content || typeof content !== 'object') return null;
+  const body = content as Record<string, unknown>;
+
+  if (body.type === 'ask_question') {
+    const title = typeof body.title === 'string' ? body.title : '';
+    const question = typeof body.question === 'string' ? body.question : '';
+    const options = Array.isArray(body.options)
+      ? body.options
+          .map((option) =>
+            typeof option === 'string'
+              ? option
+              : option && typeof option === 'object' && typeof (option as Record<string, unknown>).label === 'string'
+                ? ((option as Record<string, unknown>).label as string)
+                : '',
+          )
+          .filter(Boolean)
+      : [];
+    return [title, question, options.length ? `Reply with: ${options.join(', ')}` : ''].filter(Boolean).join('\n\n');
   }
 
-  async function resolveThreadId(threadId: string): Promise<string> {
-    if (!isUserHandle(threadId)) return threadId;
-
-    const userHandle = threadId.startsWith('matrix:') ? threadId.slice('matrix:'.length) : threadId;
-    log.info('Matrix: resolving DM room for user handle', { userHandle });
-    const resolved = await adapter.openDM(userHandle);
-
-    try {
-      const { roomID } = adapter.decodeThreadId(resolved);
-      roomToUserCache.set(roomID, userHandle);
-    } catch {
-      // decode failure is non-fatal — outbound still works
-    }
-
-    return resolved;
+  if (body.type === 'card' && body.card && typeof body.card === 'object') {
+    const card = body.card as Record<string, unknown>;
+    const candidate = [card.title, card.description, body.fallbackText].find(
+      (part) => typeof part === 'string' && part,
+    );
+    return typeof candidate === 'string' ? candidate : null;
   }
 
-  // Rewrite inbound room-based channel IDs to user-handle form for DM rooms.
-  // Non-DM rooms pass through unchanged.
-  adapter.channelIdFromThreadId = (threadId: string): string => {
-    try {
-      const { roomID } = adapter.decodeThreadId(threadId);
-      if (!roomID.startsWith('!')) return origChannelIdFromThreadId(threadId);
+  if (body.terminalCard && typeof body.terminalCard === 'object') {
+    const card = body.terminalCard as Record<string, unknown>;
+    return [card.title, card.question, card.resolution].filter((part) => typeof part === 'string' && part).join('\n\n');
+  }
 
-      const cached = roomToUserCache.get(roomID);
-      if (cached) return `matrix:${cached}`;
+  if (typeof body.markdown === 'string') return body.markdown;
+  if (typeof body.text === 'string') return body.text;
+  if (typeof body.fallbackText === 'string') return body.fallbackText;
+  return null;
+}
 
-      // Not cached — check if this is a DM by membership count
-      const client = (adapter as any).client;
-      const room = client?.getRoom(roomID);
-      if (!room) return origChannelIdFromThreadId(threadId);
-      if (room.getJoinedMemberCount() > 2) return origChannelIdFromThreadId(threadId);
+export class PersistentMatrixAdapter implements ChannelAdapter {
+  readonly name = 'matrix';
+  readonly channelType = 'matrix';
+  readonly supportsThreads = false;
+  readonly defaults = MATRIX_DEFAULTS;
 
-      const botId = (adapter as any).userID;
-      const otherMember = room.getJoinedMembers().find((m: { userId: string }) => m.userId !== botId);
-      if (!otherMember) return origChannelIdFromThreadId(threadId);
+  private client: MatrixClientLike | null = null;
+  private setupConfig: ChannelSetup | null = null;
+  private connected = false;
+  private botUserId = '';
+  private readonly userToRoom = new Map<string, string>();
 
-      roomToUserCache.set(roomID, otherMember.userId);
-      return `matrix:${otherMember.userId}`;
-    } catch {
-      return origChannelIdFromThreadId(threadId);
+  constructor(
+    private readonly clientConfig: MatrixClientConfig,
+    private readonly createClient: MatrixClientFactory = createPersistentMatrixClient,
+    private readonly autojoin = true,
+    private readonly inviteAllowlist = new Set<string>(),
+  ) {}
+
+  async setup(config: ChannelSetup): Promise<void> {
+    this.setupConfig = config;
+    this.client = await this.createClient(this.clientConfig);
+    this.botUserId = await this.client.getUserId();
+    if (this.botUserId !== this.clientConfig.userId) {
+      throw new Error(`Matrix access token belongs to ${this.botUserId}, expected ${this.clientConfig.userId}`);
     }
-  };
 
-  // The Chat SDK calls adapter.isDM(threadId) synchronously to decide whether
-  // to dispatch to onDirectMessage handlers. The Matrix adapter doesn't expose
-  // this method — it only has an async isDirectRoom(). We add a synchronous
-  // isDM that checks room membership count: 2 members = DM.
-  (adapter as any).isDM = (threadId: string): boolean => {
-    try {
-      const { roomID } = adapter.decodeThreadId(threadId);
-      const client = (adapter as any).client;
-      if (!client) return false;
-      const room = client.getRoom(roomID);
-      if (!room) return false;
-      const members = room.getJoinedMemberCount();
-      return members <= 2;
-    } catch {
-      return false;
+    this.client.on('room.invite', (...args: unknown[]) => {
+      const [roomId, event] = args as [string, MatrixEvent];
+      const inviter = event.sender ?? '';
+      if (!this.autojoin || (this.inviteAllowlist.size > 0 && !this.inviteAllowlist.has(inviter))) return;
+      void this.client
+        ?.joinRoom(roomId)
+        .catch((err: unknown) => log.error('Matrix: failed to join invited room', { err }));
+    });
+    this.client.on('room.message', (...args: unknown[]) => {
+      const [roomId, event] = args as [string, MatrixEvent];
+      void this.handleMessage(roomId, event).catch((err) => log.error('Matrix: failed to handle message', { err }));
+    });
+
+    await this.client.start();
+    this.connected = true;
+    log.info('Matrix sync ready with persistent crypto');
+  }
+
+  async teardown(): Promise<void> {
+    this.connected = false;
+    this.client?.stop();
+    this.client = null;
+    this.setupConfig = null;
+  }
+
+  isConnected(): boolean {
+    return this.connected;
+  }
+
+  async deliver(platformId: string, _threadId: string | null, message: OutboundMessage): Promise<string | undefined> {
+    const client = this.requireClient();
+    const roomId = await this.resolveRoom(platformId);
+    const content = message.content as Record<string, unknown> | undefined;
+
+    if (
+      content?.operation === 'reaction' &&
+      typeof content.messageId === 'string' &&
+      typeof content.emoji === 'string'
+    ) {
+      return client.sendEvent(roomId, 'm.reaction', {
+        'm.relates_to': { rel_type: 'm.annotation', event_id: content.messageId, key: content.emoji },
+      });
     }
-  };
 
-  adapter.postMessage = async (
-    threadId: string,
-    ...args: Parameters<typeof origPostMessage> extends [string, ...infer R] ? R : never
-  ) => {
-    const resolvedTid = await resolveThreadId(threadId);
-    return origPostMessage(resolvedTid, ...args);
-  };
+    const text = outboundText(message);
+    if (!text && !message.files?.length) return undefined;
+    const fileNote = message.files?.length
+      ? `\n\nAttachments: ${message.files.map((file) => file.filename).join(', ')}`
+      : '';
+    const body = `${text ?? ''}${fileNote}`;
+    const matrixContent: Record<string, unknown> = { msgtype: 'm.text', body };
 
-  adapter.startTyping = async (threadId: string) => {
-    const resolvedTid = await resolveThreadId(threadId);
-    return origStartTyping(resolvedTid);
-  };
+    if (content?.operation === 'edit' && typeof content.messageId === 'string') {
+      matrixContent['m.new_content'] = { msgtype: 'm.text', body };
+      matrixContent['m.relates_to'] = { rel_type: 'm.replace', event_id: content.messageId };
+    }
 
-  return adapter;
+    return client.sendMessage(roomId, matrixContent);
+  }
+
+  async setTyping(platformId: string, _threadId: string | null): Promise<void> {
+    const roomId = await this.resolveRoom(platformId);
+    await this.requireClient().setTyping(roomId, true, 30_000);
+  }
+
+  async syncConversations(): Promise<ConversationInfo[]> {
+    const client = this.requireClient();
+    const rooms = await client.getJoinedRooms();
+    return Promise.all(
+      rooms.map(async (roomId) => {
+        const members = await client.getJoinedRoomMembers(roomId);
+        const other = members.find((member) => member !== this.botUserId);
+        const isGroup = !other || members.length > 2;
+        if (!isGroup && other) this.rememberDm(roomId, other);
+        return {
+          platformId: isGroup ? `matrix:${roomId}` : `matrix:${other}`,
+          name: isGroup ? roomId : other,
+          isGroup,
+        };
+      }),
+    );
+  }
+
+  async resolveConversation(platformId: string): Promise<ResolvedConversation | null> {
+    const roomId = await this.resolveRoom(platformId);
+    const profiles = await this.requireClient().getJoinedRoomMembersWithProfiles(roomId);
+    const participantIds = Object.keys(profiles).filter((id) => id !== this.botUserId);
+    const participantNames = participantIds.map((id) => profiles[id]?.display_name || id);
+    return {
+      type: participantIds.length <= 1 ? 'direct' : 'group_dm',
+      name: participantNames.join(', ') || null,
+      participantIds,
+      participantNames,
+    };
+  }
+
+  private requireClient(): MatrixClientLike {
+    if (!this.client) throw new Error('Matrix channel is not initialized');
+    return this.client;
+  }
+
+  private rememberDm(roomId: string, userId: string): void {
+    this.userToRoom.set(userId, roomId);
+  }
+
+  private async resolveRoom(platformId: string): Promise<string> {
+    const id = unprefix(platformId);
+    if (id.startsWith('!')) return id;
+    const cached = this.userToRoom.get(id);
+    if (cached) return cached;
+    const roomId = await this.requireClient().dms.getOrCreateDm(id);
+    this.rememberDm(roomId, id);
+    return roomId;
+  }
+
+  private async handleMessage(roomId: string, event: MatrixEvent): Promise<void> {
+    const client = this.requireClient();
+    const sender = event.sender;
+    if (!sender || sender === this.botUserId) return;
+    const body = event.content?.['m.new_content']?.body ?? event.content?.body;
+    const msgtype = event.content?.['m.new_content']?.msgtype ?? event.content?.msgtype;
+    if (!body || (msgtype !== 'm.text' && msgtype !== 'm.notice')) return;
+
+    const members = await client.getJoinedRoomMembers(roomId);
+    const isDm = client.dms.isDm(roomId) || members.length <= 2;
+    if (isDm) this.rememberDm(roomId, sender);
+    const platformId = isDm ? `matrix:${sender}` : `matrix:${roomId}`;
+
+    let senderName = sender;
+    try {
+      const profiles = await client.getJoinedRoomMembersWithProfiles(roomId);
+      senderName = profiles[sender]?.display_name || sender;
+    } catch (err) {
+      log.warn('Matrix: could not resolve sender profile', { err });
+    }
+
+    const mentioned =
+      event.content?.['m.mentions']?.user_ids?.includes(this.botUserId) ?? body.includes(this.botUserId);
+    this.setupConfig?.onMetadata(platformId, isDm ? senderName : roomId, !isDm);
+    await this.setupConfig?.onInbound(platformId, null, {
+      id: event.event_id || `matrix-${event.origin_server_ts || Date.now()}`,
+      kind: 'chat',
+      timestamp: new Date(event.origin_server_ts || Date.now()).toISOString(),
+      isMention: isDm || mentioned,
+      isGroup: !isDm,
+      content: {
+        text: body,
+        sender: senderName,
+        senderName,
+        senderId: `matrix:${sender}`,
+        author: { userId: sender, userName: senderName, fullName: senderName },
+      },
+    });
+  }
+}
+
+export function createMatrixChannelAdapter(
+  env: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>>,
+  createClient: MatrixClientFactory = createPersistentMatrixClient,
+  stateDir = path.join(DATA_DIR, 'matrix'),
+): ChannelAdapter | null {
+  if (!env.MATRIX_BASE_URL || !env.MATRIX_ACCESS_TOKEN || !env.MATRIX_USER_ID) return null;
+  const allowlist = new Set(
+    (env.MATRIX_INVITE_AUTOJOIN_ALLOWLIST || '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
+  return new PersistentMatrixAdapter(
+    {
+      baseUrl: env.MATRIX_BASE_URL,
+      accessToken: env.MATRIX_ACCESS_TOKEN,
+      userId: env.MATRIX_USER_ID,
+      stateDir,
+    },
+    createClient,
+    env.MATRIX_INVITE_AUTOJOIN !== 'false',
+    allowlist,
+  );
 }
 
 registerChannelAdapter('matrix', {
-  factory: () => {
-    const env = readEnvFile([...ENV_KEYS]);
-    if (!env.MATRIX_BASE_URL) return null;
-    if (!env.MATRIX_ACCESS_TOKEN && !(env.MATRIX_USERNAME && env.MATRIX_PASSWORD)) return null;
-
-    for (const key of ENV_KEYS) {
-      if (env[key]) process.env[key] = env[key];
-    }
-
-    // Default: auto-join room invites so DMs work without manual acceptance
-    if (!process.env.MATRIX_INVITE_AUTOJOIN) {
-      process.env.MATRIX_INVITE_AUTOJOIN = 'true';
-    }
-
-    const matrixAdapter = wrapWithDmResolution(createMatrixAdapter());
-    const bridge = createChatSdkBridge({
-      adapter: matrixAdapter,
-      concurrency: 'concurrent',
-      supportsThreads: false,
-      defaults: MATRIX_DEFAULTS,
-    });
-
-    // Matrix user IDs contain ":" (e.g. "@user:matrix.org") which the shared
-    // permissions module interprets as already-prefixed. Wrap onInbound to
-    // ensure senderId always carries the "matrix:" channel prefix so user
-    // records match between init-first-agent and inbound routing.
-    const origSetup = bridge.setup.bind(bridge);
-    bridge.setup = async (hostConfig) => {
-      const origOnInbound = hostConfig.onInbound.bind(hostConfig);
-      await origSetup({
-        ...hostConfig,
-        onInbound: (platformId, threadId, message) => {
-          if (message.content && typeof message.content === 'object') {
-            const content = message.content as Record<string, unknown>;
-            if (typeof content.senderId === 'string' && !content.senderId.startsWith('matrix:')) {
-              content.senderId = `matrix:${content.senderId}`;
-            }
-          }
-          return origOnInbound(platformId, threadId, message);
-        },
-      });
-
-      // Wait for Matrix sync to reach PREPARED state before returning from setup.
-      // Without this, the host's delivery poll and sweep timer start immediately
-      // and can starve the SDK's sync generator microtask queue, blocking
-      // incremental syncs so new inbound messages never get dispatched.
-      await new Promise<void>((resolve) => {
-        const check = setInterval(() => {
-          if ((matrixAdapter as unknown as { liveSyncReady?: boolean }).liveSyncReady) {
-            log.info('Matrix sync ready');
-            clearInterval(check);
-            resolve();
-          }
-        }, 500);
-        setTimeout(() => {
-          clearInterval(check);
-          resolve();
-        }, 30_000);
-      });
-    };
-
-    return bridge;
-  },
+  factory: () => createMatrixChannelAdapter(readEnvFile([...ENV_KEYS])),
   defaults: MATRIX_DEFAULTS,
 });
