@@ -6,7 +6,7 @@ settings:
 
 patchedDependencies:
   '@beeper/chat-adapter-matrix@0.2.0':
-    hash: d8f9cda088701285b3be191ea30edfd2e96ccb7b97f2934fa8c26c1fa424c020
+    hash: 63aa56c8bfbc4267e737f8f35379392e88a9f7f7a92ff8260891a08b32d844d5
     path: patches/@beeper__chat-adapter-matrix@0.2.0.patch
 
 importers:
@@ -18,7 +18,7 @@ importers:
         version: 1.1.0(express@5.1.0)
       '@beeper/chat-adapter-matrix':
         specifier: 0.2.0
-        version: 0.2.0(patch_hash=d8f9cda088701285b3be191ea30edfd2e96ccb7b97f2934fa8c26c1fa424c020)
+        version: 0.2.0(patch_hash=63aa56c8bfbc4267e737f8f35379392e88a9f7f7a92ff8260891a08b32d844d5)
       '@clack/core':
         specifier: ^1.2.0
         version: 1.2.0
@@ -1887,7 +1887,7 @@ snapshots:
 
   '@babel/runtime@8.0.0': {}
 
-  '@beeper/chat-adapter-matrix@0.2.0(patch_hash=d8f9cda088701285b3be191ea30edfd2e96ccb7b97f2934fa8c26c1fa424c020)':
+  '@beeper/chat-adapter-matrix@0.2.0(patch_hash=63aa56c8bfbc4267e737f8f35379392e88a9f7f7a92ff8260891a08b32d844d5)':
     dependencies:
       '@chat-adapter/state-memory': 4.39.0
       '@chat-adapter/state-redis': 4.39.0

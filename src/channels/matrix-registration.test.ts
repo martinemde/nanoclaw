@@ -22,13 +22,40 @@
  * typed call, so the build/typecheck leg (`pnpm run build`) guards it against upstream
  * drift, not this test. Every Chat SDK channel follows this same shape.
  */
-import { describe, it, expect } from 'vitest';
+import { createMatrixAdapter } from '@beeper/chat-adapter-matrix';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 
 import { getRegisteredChannelNames } from './channel-registry.js';
 import './index.js'; // the real barrel — triggers every channel's self-registration
 
+afterEach(() => vi.unstubAllEnvs());
+
 describe('matrix channel registration', () => {
   it('registers matrix via the channel barrel', () => {
     expect(getRegisteredChannelNames()).toContain('matrix');
+  });
+
+  it('uses the Node crypto store when E2EE is enabled from the environment', () => {
+    vi.stubEnv('MATRIX_BASE_URL', 'https://matrix.example.test');
+    vi.stubEnv('MATRIX_ACCESS_TOKEN', 'test-token');
+    vi.stubEnv('MATRIX_USER_ID', '@finances:matrix.example.test');
+    vi.stubEnv('MATRIX_DEVICE_ID', 'FINANCE_TEST');
+    vi.stubEnv('MATRIX_RECOVERY_KEY', 'test-recovery-key');
+
+    const adapter = createMatrixAdapter();
+
+    expect(Reflect.get(adapter, 'e2eeConfig')).toMatchObject({ useIndexedDB: false });
+  });
+
+  it('does not configure a crypto store without E2EE', () => {
+    vi.stubEnv('MATRIX_BASE_URL', 'https://matrix.example.test');
+    vi.stubEnv('MATRIX_ACCESS_TOKEN', 'test-token');
+    vi.stubEnv('MATRIX_USER_ID', '@finances:matrix.example.test');
+    vi.stubEnv('MATRIX_DEVICE_ID', 'FINANCE_TEST');
+    vi.stubEnv('MATRIX_RECOVERY_KEY', '');
+
+    const adapter = createMatrixAdapter();
+
+    expect(Reflect.get(adapter, 'e2eeConfig').useIndexedDB).toBeUndefined();
   });
 });

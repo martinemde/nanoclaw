@@ -18,3 +18,12 @@ index 3360d7352fec0df580a474088205519227cc8be0..d554f290926f4aaf69a1adaf5b2f056a
 +import { SyncAccumulator } from "matrix-js-sdk/lib/sync-accumulator.js";
 +import { MemoryStore } from "matrix-js-sdk/lib/store/memory.js";
  var STORE_VERSION = 1;
+@@ -2900,5 +2900,8 @@ function createMatrixAdapter(config) {
+     commandPrefix: process.env.MATRIX_COMMAND_PREFIX,
+     recoveryKey,
++    e2ee: recoveryKey ? {
++      useIndexedDB: false
++    } : void 0,
+     inviteAutoJoin: inviteAutoJoinEnabled ? {
+       inviterAllowlist: inviteAutoJoinInviterAllowlist
+     } : void 0,
