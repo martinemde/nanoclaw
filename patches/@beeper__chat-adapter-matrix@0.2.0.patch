@@ -1,3 +1,16 @@
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index 7a92633121eb4445f675c523c91fafdb12bfbd06..f7108b3b72b7dd464ee51632fd7a33c003e3ea99 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -101,7 +101,8 @@ interface MatrixAuthBootstrapClient {
+ }
+ 
+ declare class MatrixAdapter implements Adapter<MatrixThreadID, MatrixEvent> {
+     readonly name = "matrix";
++    readonly runtimeMode: "polling";
+     readonly userName: string;
+     private readonly baseURL;
+     private readonly auth;
 diff --git a/dist/index.js b/dist/index.js
 index 3360d7352fec0df580a474088205519227cc8be0..d554f290926f4aaf69a1adaf5b2f056a31ca5f4f 100644
 --- a/dist/index.js
@@ -18,7 +31,16 @@ index 3360d7352fec0df580a474088205519227cc8be0..d554f290926f4aaf69a1adaf5b2f056a
 +import { SyncAccumulator } from "matrix-js-sdk/lib/sync-accumulator.js";
 +import { MemoryStore } from "matrix-js-sdk/lib/store/memory.js";
  var STORE_VERSION = 1;
-@@ -2900,5 +2900,8 @@ function createMatrixAdapter(config) {
+@@ -433,7 +433,8 @@ var MATRIX_SDK_LOG_LEVELS = {
+ };
+ var matrixSDKLogConfigured = false;
+ var MatrixAdapter = class {
+   name = "matrix";
++  runtimeMode = "polling";
+   userName;
+   baseURL;
+   auth;
+@@ -2900,5 +2901,8 @@ function createMatrixAdapter(config) {
      commandPrefix: process.env.MATRIX_COMMAND_PREFIX,
      recoveryKey,
 +    e2ee: recoveryKey ? {

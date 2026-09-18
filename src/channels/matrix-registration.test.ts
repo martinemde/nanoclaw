@@ -35,6 +35,16 @@ describe('matrix channel registration', () => {
     expect(getRegisteredChannelNames()).toContain('matrix');
   });
 
+  it('declares Matrix as polling so it does not bind the shared webhook port', () => {
+    vi.stubEnv('MATRIX_BASE_URL', 'https://matrix.example.test');
+    vi.stubEnv('MATRIX_ACCESS_TOKEN', 'test-token');
+    vi.stubEnv('MATRIX_USER_ID', '@finances:matrix.example.test');
+
+    const adapter = createMatrixAdapter();
+
+    expect(adapter.runtimeMode).toBe('polling');
+  });
+
   it('uses the Node crypto store when E2EE is enabled from the environment', () => {
     vi.stubEnv('MATRIX_BASE_URL', 'https://matrix.example.test');
     vi.stubEnv('MATRIX_ACCESS_TOKEN', 'test-token');
