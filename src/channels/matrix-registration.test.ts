@@ -124,17 +124,24 @@ describe('persistent Matrix E2EE', () => {
   it('maps decrypted DMs to stable user IDs and encrypts replies through the client', async () => {
     const fake = fakeMatrixClient();
     const factory = (async () => fake) as unknown as MatrixClientFactory;
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-matrix-adapter-'));
+    cleanup.push(stateDir);
+    const cryptoDir = path.join(stateDir, 'crypto');
+    fs.mkdirSync(cryptoDir);
+    const sqliteFile = path.join(cryptoDir, 'matrix-sdk-crypto.sqlite3');
+    fs.writeFileSync(sqliteFile, 'test', { mode: 0o644 });
     const adapter = new PersistentMatrixAdapter(
       {
         baseUrl: 'https://matrix.test',
         accessToken: 'secret',
         userId: '@finances:matrix.test',
-        stateDir: '/unused',
+        stateDir,
       },
       factory,
     );
     const { inbound, setup } = setupRecorder();
     await adapter.setup(setup);
+    expect(fs.statSync(sqliteFile).mode & 0o777).toBe(0o600);
 
     fake.listeners.get('room.message')?.('!dm:matrix.test', {
       event_id: '$inbound',

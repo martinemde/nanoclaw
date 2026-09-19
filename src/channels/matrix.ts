@@ -92,6 +92,14 @@ function lockDown(pathname: string, mode: number): void {
   }
 }
 
+function lockDownCryptoFiles(stateDir: string): void {
+  const cryptoDir = path.resolve(stateDir, 'crypto');
+  if (!fs.existsSync(cryptoDir)) return;
+  for (const entry of fs.readdirSync(cryptoDir, { withFileTypes: true })) {
+    if (entry.isFile()) lockDown(path.join(cryptoDir, entry.name), 0o600);
+  }
+}
+
 /** Construct the real client lazily so registration stays side-effect free. */
 export async function createPersistentMatrixClient(config: MatrixClientConfig): Promise<MatrixClientLike> {
   const { MatrixClient, RustSdkCryptoStorageProvider, SimpleFsStorageProvider } = await import('matrix-bot-sdk');
@@ -200,6 +208,10 @@ export class PersistentMatrixAdapter implements ChannelAdapter {
     });
 
     await this.client.start();
+    // SQLite creates the database, WAL, and shared-memory files during crypto
+    // startup. Tighten them after preparation; the parent directory is 0700
+    // throughout, so there is no exposure window to another local identity.
+    lockDownCryptoFiles(this.clientConfig.stateDir);
     this.connected = true;
     log.info('Matrix sync ready with persistent crypto');
   }
