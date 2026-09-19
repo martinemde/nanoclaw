@@ -90,7 +90,7 @@ async function main(): Promise<void> {
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {
     return {
       onInbound(platformId, threadId, message) {
-        routeInbound({
+        return routeInbound({
           channelType: adapter.channelType,
           // The one host-side stamping seam: adapters stay instance-blind,
           // the host stamps the receiving instance on every inbound event.
@@ -107,15 +107,17 @@ async function main(): Promise<void> {
           },
         }).catch((err) => {
           log.error('Failed to route inbound message', { channelType: adapter.channelType, err });
+          throw err;
         });
       },
       onInboundEvent(event) {
-        routeInbound(event).catch((err) => {
+        return routeInbound(event).catch((err) => {
           log.error('Failed to route inbound event', {
             sourceAdapter: adapter.channelType,
             targetChannelType: event.channelType,
             err,
           });
+          throw err;
         });
       },
       onMetadata(platformId, name, isGroup) {
@@ -127,7 +129,7 @@ async function main(): Promise<void> {
         });
       },
       onAction(questionId, selectedOption, userId) {
-        dispatchResponse({
+        return dispatchResponse({
           questionId,
           value: selectedOption,
           userId,
@@ -139,6 +141,7 @@ async function main(): Promise<void> {
           threadId: null,
         }).catch((err) => {
           log.error('Failed to handle question response', { questionId, err });
+          throw err;
         });
       },
     };

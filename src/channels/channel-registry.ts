@@ -7,6 +7,9 @@
 import type { ChannelAdapter, ChannelDefaults, ChannelRegistration, ChannelSetup, OutboundFile } from './adapter.js';
 import type { ChannelDeliveryAdapter } from '../delivery.js';
 import { log } from '../log.js';
+import { readEnvFile } from '../env.js';
+import { readFile } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
 
 /** Adapter instance registry key shape: a webhook route segment and state-namespace key, so URL-safe only. */
 export const INSTANCE_KEY_RE = /^[A-Za-z0-9._-]+$/;
@@ -106,12 +109,14 @@ export function createChannelDeliveryAdapter(): ChannelDeliveryAdapter {
       content: string,
       files?: OutboundFile[],
       instance?: string,
+      messageId?: string,
+      metadata?: Record<string, unknown>,
     ): Promise<string | undefined> {
       const adapter = getChannelAdapterExact(instance ?? channelType);
       if (!adapter) {
         throw new MissingChannelAdapterError(channelType, instance);
       }
-      return adapter.deliver(platformId, threadId, { kind, content: JSON.parse(content), files });
+      return adapter.deliver(platformId, threadId, { id: messageId, metadata, kind, content: JSON.parse(content), files });
     },
     async setTyping(
       channelType: string,
@@ -266,6 +271,16 @@ export function getChannelContainerConfig(name: string): ChannelRegistration['co
  */
 export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => ChannelSetup): Promise<void> {
   hotStartSetupFn = setupFn;
+  const env = readEnvFile(['NATS_BRIDGE_MODULE', 'NATS_BRIDGE_CONFIG']);
+  if (env.NATS_BRIDGE_CONFIG) {
+    if (!env.NATS_BRIDGE_MODULE) throw new Error('NATS_BRIDGE_MODULE is required');
+    const module = await import(pathToFileURL(env.NATS_BRIDGE_MODULE).href);
+    const config = JSON.parse(await readFile(env.NATS_BRIDGE_CONFIG, 'utf8'));
+    const adapters: ChannelAdapter[] = await module.runtimeSurfaces(config);
+    // The local CLI is administrative; every external projection is remote.
+    for (const name of registry.keys()) if (name !== 'cli') registry.delete(name);
+    for (const adapter of adapters) registry.set(adapter.instance ?? adapter.channelType, { factory: () => adapter, defaults: adapter.defaults });
+  }
   for (const [name, registration] of registry) {
     try {
       const adapter = await registration.factory();
@@ -314,6 +329,13 @@ export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => 
       log.error('Failed to start channel adapter', { channel: name, err });
     }
   }
+}
+
+/** Projection hosts load a transport without starting an agent runtime. */
+export async function createRegisteredProjection(name: string): Promise<ChannelAdapter> {
+  const adapter = await registry.get(name)?.factory();
+  if (!adapter) throw new Error(`Projection ${name} is not configured`);
+  return adapter;
 }
 
 /** Tear down all active adapters. */

@@ -9,6 +9,8 @@
  */
 import fs from 'fs';
 import path from 'path';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { createHash } from 'node:crypto';
 
 import { DATA_DIR } from '../config.js';
 import { readEnvFile } from '../env.js';
@@ -28,6 +30,7 @@ const MATRIX_DEFAULTS: ChannelDefaults = {
   group: { engageMode: 'mention', threads: false, unknownSenderPolicy: 'request_approval' },
   mentions: 'platform',
 };
+const deliveryIdentity = new AsyncLocalStorage<string>();
 
 const ENV_KEYS = [
   'MATRIX_BASE_URL',
@@ -128,7 +131,17 @@ export async function createPersistentMatrixClient(config: MatrixClientConfig): 
   const crypto = new RustSdkCryptoStorageProvider(cryptoDir, 0);
   lockDown(path.join(cryptoDir, 'bot-sdk.json'), 0o600);
 
-  return new MatrixClient(config.baseUrl, config.accessToken, storage, crypto) as unknown as MatrixClientLike;
+  const client = new MatrixClient(config.baseUrl, config.accessToken, storage, crypto);
+  const sendRaw = client.sendRawEvent.bind(client);
+  client.sendRawEvent = async (roomId, eventType, content) => {
+    const id = deliveryIdentity.getStore();
+    if (!id) return sendRaw(roomId, eventType, content);
+    // Encryption still happens in sendEvent; only the HTTP transaction identity changes.
+    const txn = createHash('sha256').update(id).digest('hex');
+    const response = await client.doRequest('PUT', `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/${encodeURIComponent(eventType)}/${txn}`, null, content);
+    return response.event_id;
+  };
+  return client as unknown as MatrixClientLike;
 }
 
 function unprefix(value: string): string {
@@ -250,7 +263,7 @@ export class PersistentMatrixAdapter implements ChannelAdapter {
     });
     this.client.on('room.message', (...args: unknown[]) => {
       const [roomId, event] = args as [string, MatrixEvent];
-      void this.handleMessage(roomId, event).catch((err) => log.error('Matrix: failed to handle message', { err }));
+      return this.handleMessage(roomId, event);
     });
 
     await this.client.start();
@@ -274,6 +287,10 @@ export class PersistentMatrixAdapter implements ChannelAdapter {
   }
 
   async deliver(platformId: string, _threadId: string | null, message: OutboundMessage): Promise<string | undefined> {
+    return deliveryIdentity.run(message.id || '', () => this.deliverMessage(platformId, message));
+  }
+
+  private async deliverMessage(platformId: string, message: OutboundMessage): Promise<string | undefined> {
     const client = this.requireClient();
     const roomId = await this.resolveRoom(platformId);
     const content = message.content as Record<string, unknown> | undefined;
@@ -389,15 +406,15 @@ export class PersistentMatrixAdapter implements ChannelAdapter {
     }
   }
 
-  private handlePendingTextAction(roomId: string, sender: string, body: string): boolean {
+  private async handlePendingTextAction(roomId: string, sender: string, body: string): Promise<boolean> {
     const pending = this.pendingTextActions.get(roomId);
     if (!pending) return false;
     const answer = body.trim().toLocaleLowerCase();
     const option = pending.options.find((candidate) => candidate.label.toLocaleLowerCase() === answer);
     if (!option) return false;
+    await this.setupConfig?.onAction(pending.questionId, option.value, `matrix:${sender}`);
     this.pendingTextActions.delete(roomId);
     this.persistPendingTextActions();
-    this.setupConfig?.onAction(pending.questionId, option.value, `matrix:${sender}`);
     return true;
   }
 
@@ -422,7 +439,7 @@ export class PersistentMatrixAdapter implements ChannelAdapter {
     const body = event.content?.['m.new_content']?.body ?? event.content?.body;
     const msgtype = event.content?.['m.new_content']?.msgtype ?? event.content?.msgtype;
     if (!body || (msgtype !== 'm.text' && msgtype !== 'm.notice')) return;
-    if (this.handlePendingTextAction(roomId, sender, body)) return;
+    if (await this.handlePendingTextAction(roomId, sender, body)) return;
 
     const members = await client.getJoinedRoomMembers(roomId);
     // Matrix keeps rooms in m.direct after more people join. Membership is

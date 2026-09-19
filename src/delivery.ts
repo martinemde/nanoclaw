@@ -100,6 +100,8 @@ export interface ChannelDeliveryAdapter {
     /** Delivering adapter instance (defaults to channelType downstream).
      *  Host-internal only — containers never see instance. */
     instance?: string,
+    messageId?: string,
+    metadata?: Record<string, unknown>,
   ): Promise<string | undefined>;
   setTyping?(
     channelType: string,
@@ -286,6 +288,10 @@ async function drainSession(session: Session): Promise<void> {
         }
       }
     } catch (err) {
+      if ((err as { code?: string })?.code === 'DELIVERY_PENDING') {
+        log.info('Durable transport delivery still pending', { messageId: msg.id, sessionId: session.id });
+        continue;
+      }
       const attempts = await recordAttemptRow(msg.id, session.id, err);
       if (attempts !== null && attempts >= MAX_DELIVERY_ATTEMPTS) {
         log.error('Message delivery failed permanently, giving up', {
@@ -498,6 +504,8 @@ async function deliverMessage(
     msg.content,
     files,
     deliverInstance,
+    msg.id,
+    { native: msg, sessionId: session.id, agentGroupId: session.agent_group_id },
   );
   log.info('Message delivered', {
     id: msg.id,

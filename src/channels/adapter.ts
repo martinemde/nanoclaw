@@ -22,7 +22,7 @@ export interface ChannelSetup {
   onMetadata(platformId: string, name?: string, isGroup?: boolean): void;
 
   /** Called when a user clicks a button/action in a card (e.g., ask_user_question response). */
-  onAction(questionId: string, selectedOption: string, userId: string): void;
+  onAction(questionId: string, selectedOption: string, userId: string): void | Promise<void>;
 }
 
 /** Delivery address used for reply-to overrides and (normally) the inbound's own origin. */
@@ -100,6 +100,9 @@ export interface OutboundFile {
 
 /** Outbound message from host to adapter. */
 export interface OutboundMessage {
+  /** Stable runtime identity used by durable transports and platform retries. */
+  id?: string;
+  metadata?: Record<string, unknown>;
   kind: string;
   content: unknown; // parsed JSON from messages_out
   files?: OutboundFile[]; // file attachments from the session outbox
