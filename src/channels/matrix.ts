@@ -411,7 +411,10 @@ export class PersistentMatrixAdapter implements ChannelAdapter {
     if (this.handlePendingTextAction(roomId, sender, body)) return;
 
     const members = await client.getJoinedRoomMembers(roomId);
-    const isDm = client.dms.isDm(roomId) || members.length <= 2;
+    // Matrix keeps rooms in m.direct after more people join. Membership is
+    // authoritative here: a converted DM must be keyed by room ID so every
+    // participant shares the same NanoClaw conversation and wiring.
+    const isDm = members.length <= 2;
     if (isDm) this.rememberDm(roomId, sender);
     const platformId = isDm ? `matrix:${sender}` : `matrix:${roomId}`;
 

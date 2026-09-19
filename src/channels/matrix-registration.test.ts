@@ -178,6 +178,45 @@ describe('persistent Matrix E2EE', () => {
     expect(fake.stopped).toBe(true);
   });
 
+  it('keys a converted DM with three members by room ID', async () => {
+    const fake = fakeMatrixClient();
+    fake.getJoinedRoomMembers = async () => ['@finances:matrix.test', '@martin:matrix.test', '@codex:matrix.test'];
+    fake.getJoinedRoomMembersWithProfiles = async () => ({
+      '@finances:matrix.test': { display_name: 'Meowth' },
+      '@martin:matrix.test': { display_name: 'Martin' },
+      '@codex:matrix.test': { display_name: 'Codex' },
+    });
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-matrix-converted-dm-'));
+    cleanup.push(stateDir);
+    const adapter = new PersistentMatrixAdapter(
+      {
+        baseUrl: 'https://matrix.test',
+        accessToken: 'secret',
+        userId: '@finances:matrix.test',
+        stateDir,
+      },
+      (async () => fake) as unknown as MatrixClientFactory,
+    );
+    const { inbound, setup } = setupRecorder();
+    await adapter.setup(setup);
+
+    fake.listeners.get('room.message')?.('!payday:matrix.test', {
+      event_id: '$group-message',
+      sender: '@codex:matrix.test',
+      content: {
+        msgtype: 'm.text',
+        body: '@finances:matrix.test ping',
+        'm.mentions': { user_ids: ['@finances:matrix.test'] },
+      },
+    });
+    await vi.waitFor(() => expect(inbound).toHaveLength(1));
+
+    expect(inbound[0]).toMatchObject({
+      platformId: 'matrix:!payday:matrix.test',
+      message: { isMention: true, isGroup: true },
+    });
+  });
+
   it('persists Matrix question options and turns an exact text reply into an action after restart', async () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-matrix-actions-'));
     cleanup.push(stateDir);
