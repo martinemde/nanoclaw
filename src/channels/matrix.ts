@@ -76,6 +76,11 @@ interface MatrixClientLike {
   };
 }
 
+interface PendingTextAction {
+  questionId: string;
+  options: Array<{ label: string; value: string }>;
+}
+
 export interface MatrixClientConfig {
   baseUrl: string;
   accessToken: string;
@@ -169,6 +174,22 @@ function outboundText(message: OutboundMessage): string | null {
   return null;
 }
 
+function pendingTextAction(message: OutboundMessage): PendingTextAction | null {
+  if (!message.content || typeof message.content !== 'object') return null;
+  const body = message.content as Record<string, unknown>;
+  if (body.type !== 'ask_question' || typeof body.questionId !== 'string' || !Array.isArray(body.options)) {
+    return null;
+  }
+  const options = body.options.flatMap((raw) => {
+    if (typeof raw === 'string' && raw.trim()) return [{ label: raw.trim(), value: raw }];
+    if (!raw || typeof raw !== 'object') return [];
+    const option = raw as Record<string, unknown>;
+    if (typeof option.label !== 'string' || typeof option.value !== 'string' || !option.label.trim()) return [];
+    return [{ label: option.label.trim(), value: option.value }];
+  });
+  return options.length > 0 ? { questionId: body.questionId, options } : null;
+}
+
 export class PersistentMatrixAdapter implements ChannelAdapter {
   readonly name = 'matrix';
   readonly channelType = 'matrix';
@@ -180,6 +201,7 @@ export class PersistentMatrixAdapter implements ChannelAdapter {
   private connected = false;
   private botUserId = '';
   private readonly userToRoom = new Map<string, string>();
+  private readonly pendingTextActions = new Map<string, PendingTextAction>();
 
   constructor(
     private readonly clientConfig: MatrixClientConfig,
@@ -190,6 +212,7 @@ export class PersistentMatrixAdapter implements ChannelAdapter {
 
   async setup(config: ChannelSetup): Promise<void> {
     this.setupConfig = config;
+    this.loadPendingTextActions();
     this.client = await this.createClient(this.clientConfig);
     this.botUserId = await this.client.getUserId();
     if (this.botUserId !== this.clientConfig.userId) {
@@ -264,7 +287,13 @@ export class PersistentMatrixAdapter implements ChannelAdapter {
       matrixContent['m.relates_to'] = { rel_type: 'm.replace', event_id: content.messageId };
     }
 
-    return client.sendMessage(roomId, matrixContent);
+    const eventId = await client.sendMessage(roomId, matrixContent);
+    const pending = pendingTextAction(message);
+    if (pending) {
+      this.pendingTextActions.set(roomId, pending);
+      this.persistPendingTextActions();
+    }
+    return eventId;
   }
 
   async setTyping(platformId: string, _threadId: string | null): Promise<void> {
@@ -308,6 +337,56 @@ export class PersistentMatrixAdapter implements ChannelAdapter {
     return this.client;
   }
 
+  private pendingTextActionsPath(): string {
+    return path.join(this.clientConfig.stateDir, 'pending-actions.json');
+  }
+
+  private loadPendingTextActions(): void {
+    const pathname = this.pendingTextActionsPath();
+    if (!fs.existsSync(pathname)) return;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(pathname, 'utf8')) as Record<string, PendingTextAction>;
+      for (const [roomId, pending] of Object.entries(parsed)) {
+        if (
+          typeof pending?.questionId === 'string' &&
+          Array.isArray(pending.options) &&
+          pending.options.every((option) => typeof option?.label === 'string' && typeof option.value === 'string')
+        ) {
+          this.pendingTextActions.set(roomId, pending);
+        }
+      }
+      lockDown(pathname, 0o600);
+    } catch (err) {
+      log.warn('Matrix: could not load pending text actions', { pathname, err });
+    }
+  }
+
+  private persistPendingTextActions(): void {
+    const pathname = this.pendingTextActionsPath();
+    const temporary = `${pathname}.tmp`;
+    try {
+      fs.mkdirSync(this.clientConfig.stateDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(temporary, JSON.stringify(Object.fromEntries(this.pendingTextActions)), { mode: 0o600 });
+      fs.renameSync(temporary, pathname);
+      lockDown(this.clientConfig.stateDir, 0o700);
+      lockDown(pathname, 0o600);
+    } catch (err) {
+      log.error('Matrix: could not persist pending text actions', { pathname, err });
+    }
+  }
+
+  private handlePendingTextAction(roomId: string, sender: string, body: string): boolean {
+    const pending = this.pendingTextActions.get(roomId);
+    if (!pending) return false;
+    const answer = body.trim().toLocaleLowerCase();
+    const option = pending.options.find((candidate) => candidate.label.toLocaleLowerCase() === answer);
+    if (!option) return false;
+    this.pendingTextActions.delete(roomId);
+    this.persistPendingTextActions();
+    this.setupConfig?.onAction(pending.questionId, option.value, `matrix:${sender}`);
+    return true;
+  }
+
   private rememberDm(roomId: string, userId: string): void {
     this.userToRoom.set(userId, roomId);
   }
@@ -329,6 +408,7 @@ export class PersistentMatrixAdapter implements ChannelAdapter {
     const body = event.content?.['m.new_content']?.body ?? event.content?.body;
     const msgtype = event.content?.['m.new_content']?.msgtype ?? event.content?.msgtype;
     if (!body || (msgtype !== 'm.text' && msgtype !== 'm.notice')) return;
+    if (this.handlePendingTextAction(roomId, sender, body)) return;
 
     const members = await client.getJoinedRoomMembers(roomId);
     const isDm = client.dms.isDm(roomId) || members.length <= 2;

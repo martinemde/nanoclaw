@@ -77,15 +77,18 @@ function fakeMatrixClient() {
 
 function setupRecorder() {
   const inbound: Array<{ platformId: string; message: unknown }> = [];
+  const actions: Array<{ questionId: string; selectedOption: string; userId: string }> = [];
   const setup: ChannelSetup = {
     onInbound(platformId, _threadId, message) {
       inbound.push({ platformId, message });
     },
     onInboundEvent() {},
     onMetadata() {},
-    onAction() {},
+    onAction(questionId, selectedOption, userId) {
+      actions.push({ questionId, selectedOption, userId });
+    },
   };
-  return { inbound, setup };
+  return { actions, inbound, setup };
 }
 
 describe('matrix channel registration', () => {
@@ -173,5 +176,58 @@ describe('persistent Matrix E2EE', () => {
 
     await adapter.teardown();
     expect(fake.stopped).toBe(true);
+  });
+
+  it('persists Matrix question options and turns an exact text reply into an action after restart', async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-matrix-actions-'));
+    cleanup.push(stateDir);
+    const firstFake = fakeMatrixClient();
+    firstFake.dms.isDm = () => false;
+    firstFake.getJoinedRoomMembers = async () => ['@finances:matrix.test', '@martin:matrix.test', '@codex:matrix.test'];
+    const config: MatrixClientConfig = {
+      baseUrl: 'https://matrix.test',
+      accessToken: 'secret',
+      userId: '@finances:matrix.test',
+      stateDir,
+    };
+    const first = new PersistentMatrixAdapter(config, (async () => firstFake) as unknown as MatrixClientFactory);
+    await first.setup(setupRecorder().setup);
+    await first.deliver('matrix:!payday:matrix.test', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'ask_question',
+        questionId: 'mg-payday',
+        title: 'Connect room',
+        question: 'Choose an agent.',
+        options: [{ label: 'Connect to Finances', value: 'connect:finance-agent' }],
+      },
+    });
+    await first.teardown();
+
+    const pendingFile = path.join(stateDir, 'pending-actions.json');
+    expect(fs.statSync(pendingFile).mode & 0o777).toBe(0o600);
+
+    const secondFake = fakeMatrixClient();
+    secondFake.dms.isDm = () => false;
+    secondFake.getJoinedRoomMembers = firstFake.getJoinedRoomMembers;
+    const second = new PersistentMatrixAdapter(config, (async () => secondFake) as unknown as MatrixClientFactory);
+    const { actions, inbound, setup } = setupRecorder();
+    await second.setup(setup);
+    secondFake.listeners.get('room.message')?.('!payday:matrix.test', {
+      event_id: '$approval',
+      sender: '@martin:matrix.test',
+      content: { msgtype: 'm.text', body: '  connect TO finances  ' },
+    });
+    await vi.waitFor(() => expect(actions).toHaveLength(1));
+
+    expect(actions).toEqual([
+      {
+        questionId: 'mg-payday',
+        selectedOption: 'connect:finance-agent',
+        userId: 'matrix:@martin:matrix.test',
+      },
+    ]);
+    expect(inbound).toHaveLength(0);
+    expect(JSON.parse(fs.readFileSync(pendingFile, 'utf8'))).toEqual({});
   });
 });
