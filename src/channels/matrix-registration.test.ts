@@ -25,10 +25,12 @@ afterEach(() => {
 function fakeMatrixClient() {
   const listeners = new Map<string, (...args: unknown[]) => unknown>();
   const sent: Array<{ roomId: string; content: Record<string, unknown> }> = [];
+  const displayNames: string[] = [];
   let stopped = false;
   return {
     listeners,
     sent,
+    displayNames,
     get stopped() {
       return stopped;
     },
@@ -37,6 +39,9 @@ function fakeMatrixClient() {
     },
     async getUserId() {
       return '@finances:matrix.test';
+    },
+    async setDisplayName(displayName: string) {
+      displayNames.push(displayName);
     },
     async start() {},
     stop() {
@@ -135,12 +140,14 @@ describe('persistent Matrix E2EE', () => {
         baseUrl: 'https://matrix.test',
         accessToken: 'secret',
         userId: '@finances:matrix.test',
+        displayName: 'Assayer',
         stateDir,
       },
       factory,
     );
     const { inbound, setup } = setupRecorder();
     await adapter.setup(setup);
+    expect(fake.displayNames).toEqual(['Assayer']);
     expect(fs.statSync(sqliteFile).mode & 0o777).toBe(0o600);
 
     fake.listeners.get('room.message')?.('!dm:matrix.test', {

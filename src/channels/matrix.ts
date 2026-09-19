@@ -53,6 +53,7 @@ interface MatrixEvent {
 interface MatrixClientLike {
   on(event: string, listener: (...args: unknown[]) => unknown): unknown;
   getUserId(): Promise<string>;
+  setDisplayName(displayName: string): Promise<unknown>;
   start(): Promise<unknown>;
   stop(): void;
   joinRoom(roomId: string): Promise<unknown>;
@@ -79,6 +80,7 @@ export interface MatrixClientConfig {
   baseUrl: string;
   accessToken: string;
   userId: string;
+  displayName?: string;
   stateDir: string;
 }
 
@@ -192,6 +194,13 @@ export class PersistentMatrixAdapter implements ChannelAdapter {
     this.botUserId = await this.client.getUserId();
     if (this.botUserId !== this.clientConfig.userId) {
       throw new Error(`Matrix access token belongs to ${this.botUserId}, expected ${this.clientConfig.userId}`);
+    }
+    if (this.clientConfig.displayName) {
+      try {
+        await this.client.setDisplayName(this.clientConfig.displayName);
+      } catch (err) {
+        log.warn('Matrix: could not apply configured display name', { err });
+      }
     }
 
     this.client.on('room.invite', (...args: unknown[]) => {
@@ -371,6 +380,7 @@ export function createMatrixChannelAdapter(
       baseUrl: env.MATRIX_BASE_URL,
       accessToken: env.MATRIX_ACCESS_TOKEN,
       userId: env.MATRIX_USER_ID,
+      displayName: env.MATRIX_BOT_USERNAME?.trim() || undefined,
       stateDir,
     },
     createClient,
