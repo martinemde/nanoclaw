@@ -140,14 +140,14 @@ describe('persistent Matrix E2EE', () => {
         baseUrl: 'https://matrix.test',
         accessToken: 'secret',
         userId: '@finances:matrix.test',
-        displayName: 'Assayer',
+        displayName: 'Meowth',
         stateDir,
       },
       factory,
     );
     const { inbound, setup } = setupRecorder();
     await adapter.setup(setup);
-    expect(fake.displayNames).toEqual(['Assayer']);
+    expect(fake.displayNames).toEqual(['Meowth']);
     expect(fs.statSync(sqliteFile).mode & 0o777).toBe(0o600);
 
     fake.listeners.get('room.message')?.('!dm:matrix.test', {
