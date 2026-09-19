@@ -27,6 +27,7 @@ function fakeMatrixClient() {
   const sent: Array<{ roomId: string; content: Record<string, unknown> }> = [];
   const displayNames: string[] = [];
   let stopped = false;
+  let started = false;
   return {
     listeners,
     sent,
@@ -34,16 +35,24 @@ function fakeMatrixClient() {
     get stopped() {
       return stopped;
     },
+    get started() {
+      return started;
+    },
     on(event: string, listener: (...args: unknown[]) => unknown) {
       listeners.set(event, listener);
     },
-    async getUserId() {
-      return '@finances:matrix.test';
+    async getWhoAmI() {
+      return { user_id: '@finances:matrix.test', device_id: 'FRESH_DEVICE' };
+    },
+    async getUserDevices() {
+      return { device_keys: { '@finances:matrix.test': {} } };
     },
     async setDisplayName(displayName: string) {
       displayNames.push(displayName);
     },
-    async start() {},
+    async start() {
+      started = true;
+    },
     stop() {
       stopped = true;
     },
@@ -127,6 +136,34 @@ describe('persistent Matrix E2EE', () => {
     expect(second.cryptoStore?.storagePath).toBe(path.join(stateDir, 'crypto'));
     expect(fs.statSync(stateDir).mode & 0o777).toBe(0o700);
     expect(fs.statSync(path.join(stateDir, 'crypto', 'bot-sdk.json')).mode & 0o777).toBe(0o600);
+  });
+
+  it('refuses an existing device when its local crypto state is missing', async () => {
+    const fake = fakeMatrixClient();
+    fake.getWhoAmI = async () => ({ user_id: '@finances:matrix.test', device_id: 'FINANCE_THRIA' });
+    fake.getUserDevices = async () => ({
+      device_keys: {
+        '@finances:matrix.test': {
+          FINANCE_THRIA: { user_id: '@finances:matrix.test', device_id: 'FINANCE_THRIA' },
+        },
+      },
+    });
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-matrix-missing-crypto-'));
+    cleanup.push(stateDir);
+    const adapter = new PersistentMatrixAdapter(
+      {
+        baseUrl: 'https://matrix.test',
+        accessToken: 'reused-token',
+        userId: '@finances:matrix.test',
+        stateDir,
+      },
+      (async () => fake) as unknown as MatrixClientFactory,
+    );
+
+    await expect(adapter.setup(setupRecorder().setup)).rejects.toThrow(
+      'Matrix device FINANCE_THRIA already has published encryption keys, but its local crypto state is missing',
+    );
+    expect(fake.started).toBe(false);
   });
 
   it('maps decrypted DMs to stable user IDs and encrypts replies through the client', async () => {

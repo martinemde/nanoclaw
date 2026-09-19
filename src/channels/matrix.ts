@@ -52,7 +52,10 @@ interface MatrixEvent {
 
 interface MatrixClientLike {
   on(event: string, listener: (...args: unknown[]) => unknown): unknown;
-  getUserId(): Promise<string>;
+  getWhoAmI(): Promise<{ user_id: string; device_id?: string }>;
+  getUserDevices(userIds: string[]): Promise<{
+    device_keys: Record<string, Record<string, unknown>>;
+  }>;
   setDisplayName(displayName: string): Promise<unknown>;
   start(): Promise<unknown>;
   stop(): void;
@@ -213,10 +216,21 @@ export class PersistentMatrixAdapter implements ChannelAdapter {
   async setup(config: ChannelSetup): Promise<void> {
     this.setupConfig = config;
     this.loadPendingTextActions();
+    const cryptoDatabase = path.resolve(this.clientConfig.stateDir, 'crypto', 'matrix-sdk-crypto.sqlite3');
+    const hasCryptoState = fs.existsSync(cryptoDatabase) && fs.statSync(cryptoDatabase).size > 0;
     this.client = await this.createClient(this.clientConfig);
-    this.botUserId = await this.client.getUserId();
+    const identity = await this.client.getWhoAmI();
+    this.botUserId = identity.user_id;
     if (this.botUserId !== this.clientConfig.userId) {
       throw new Error(`Matrix access token belongs to ${this.botUserId}, expected ${this.clientConfig.userId}`);
+    }
+    if (!hasCryptoState && identity.device_id) {
+      const devices = await this.client.getUserDevices([this.botUserId]);
+      if (devices.device_keys[this.botUserId]?.[identity.device_id]) {
+        throw new Error(
+          `Matrix device ${identity.device_id} already has published encryption keys, but its local crypto state is missing. Create a fresh Matrix device and access token instead of reusing this one.`,
+        );
+      }
     }
     if (this.clientConfig.displayName) {
       try {
