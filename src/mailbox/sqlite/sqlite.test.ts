@@ -11,6 +11,40 @@ describe('SQLite mailbox canonical serialization', () => {
     for (const database of databases.splice(0)) database.close();
   });
 
+  it('accepts an identical redelivery without resetting completed work, and rejects conflicting reuse', async () => {
+    const db = new Database(':memory:');
+    databases.push(db);
+    db.exec(INBOUND_SCHEMA);
+    let sequence = 0;
+    const mailbox = wrapSqliteInbound(db, () => (sequence += 2));
+    const message = { id: 'matrix-event', kind: 'chat' as const, timestamp: '2026-09-24T00:00:00.000Z',
+      platformId: 'matrix:@operator:example', channelType: 'matrix', threadId: null, processAfter: null, recurrence: null, content: '{"text":"hello"}' };
+    await mailbox.insertMessage(message);
+    db.prepare("UPDATE messages_in SET status = 'completed', tries = 2 WHERE id = ?").run(message.id);
+    const original = db.prepare('SELECT * FROM messages_in').all();
+    await mailbox.insertMessage(message);
+    expect(db.prepare('SELECT * FROM messages_in').all()).toEqual(original);
+    await expect(mailbox.insertMessage({ ...message, content: '{"text":"different"}' })).rejects.toThrow('Conflicting inbound message');
+    expect(db.prepare('SELECT * FROM messages_in').all()).toEqual(original);
+  });
+
+  it('recognizes the same Matrix event across the legacy and native wrappers', async () => {
+    const db = new Database(':memory:');
+    databases.push(db);
+    db.exec(INBOUND_SCHEMA);
+    let sequence = 0;
+    const mailbox = wrapSqliteInbound(db, () => (sequence += 2));
+    const message = { id: '$matrix-event:agent', kind: 'chat-sdk' as const, timestamp: '2026-09-24T00:00:00.000Z',
+      platformId: 'matrix:@operator:example', channelType: 'matrix', threadId: null, processAfter: null, recurrence: null,
+      content: JSON.stringify({ _type: 'chat:Message', text: 'hello', senderId: 'matrix:@operator:example', attachments: [], senderName: 'Old display name' }) };
+    await mailbox.insertMessage(message);
+    const original = db.prepare('SELECT * FROM messages_in').all();
+    const native = { ...message, kind: 'chat' as const, content: JSON.stringify({ text: 'hello', senderId: 'matrix:@operator:example', senderName: 'New display name' }) };
+    await mailbox.insertMessage(native);
+    expect(db.prepare('SELECT * FROM messages_in').all()).toEqual(original);
+    await expect(mailbox.insertMessage({ ...native, content: JSON.stringify({ text: 'different', senderId: 'matrix:@operator:example' }) })).rejects.toThrow('Conflicting inbound message');
+  });
+
   it('round-trips full lifecycle records through the SQLite adapter', async () => {
     const inboundDb = new Database(':memory:');
     const outboundDb = new Database(':memory:');

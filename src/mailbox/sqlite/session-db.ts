@@ -95,14 +95,33 @@ export function nextEvenSeq(db: Database.Database): number {
 
 export function insertMessage(db: Database.Database, message: InboundWrite, sequence = nextEvenSeq(db)): void {
   const record = createInboundRecord(message, sequence);
-  db.prepare(
-    `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content, process_after, recurrence, series_id, trigger, source_session_id, on_wake)
-     VALUES (@id, @sequence, @kind, @timestamp, @status, @platformId, @channelType, @threadId, @content, @processAfter, @recurrence, @seriesId, @trigger, @sourceSessionId, @onWake)`,
-  ).run({
-    ...record,
-    trigger: record.trigger ? 1 : 0,
-    onWake: record.onWake ? 1 : 0,
+  // Native inbox commit can precede a lost NATS receipt. Redelivery must not
+  // reset status, retry counters, sequence, or already executed work.
+  const write = db.transaction(() => {
+    const existing = db.prepare(`SELECT kind, timestamp, platform_id AS platformId,
+      channel_type AS channelType, thread_id AS threadId, content,
+      source_session_id AS sourceSessionId FROM messages_in WHERE id = ?`).get(record.id) as Record<string, unknown> | undefined;
+    if (existing) {
+      // Matrix event IDs survive the switch from Chat SDK to native Matrix.
+      // Their wrapper changes, but author, text, attachments and routing do not.
+      const legacyMatrix = existing.channelType === 'matrix' && existing.kind === 'chat-sdk' && record.kind === 'chat';
+      for (const [field, value] of Object.entries(existing)) {
+        if (legacyMatrix && field === 'kind') continue;
+        if (legacyMatrix && field === 'content') {
+          const before = JSON.parse(String(value)), after = JSON.parse(record.content);
+          if (before.text === after.text && before.senderId === after.senderId &&
+              JSON.stringify(before.attachments ?? []) === JSON.stringify(after.attachments ?? [])) continue;
+        }
+        if (value !== record[field as keyof typeof record]) throw new Error(`Conflicting inbound message: ${record.id}`);
+      }
+      return;
+    }
+    db.prepare(
+      `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content, process_after, recurrence, series_id, trigger, source_session_id, on_wake)
+       VALUES (@id, @sequence, @kind, @timestamp, @status, @platformId, @channelType, @threadId, @content, @processAfter, @recurrence, @seriesId, @trigger, @sourceSessionId, @onWake)`,
+    ).run({ ...record, trigger: record.trigger ? 1 : 0, onWake: record.onWake ? 1 : 0 });
   });
+  write();
 }
 
 export function countDueMessages(db: Database.Database): number {
