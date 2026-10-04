@@ -33,6 +33,7 @@ import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js
 import { log } from './log.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
 import { requestWake } from './request-wake.js';
+import { processInbound } from './inbound-processor.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from './types.js';
 import type { InboundEvent } from './channels/adapter.js';
@@ -585,6 +586,15 @@ async function deliverToAgent(
     await backfillNewSession(agentGroup, session, mg);
   }
 
+  const decision = wake ? await processInbound(event, agentGroup) : undefined;
+  const handled = decision?.route === 'handled';
+  const inboundContent =
+    decision?.route === 'agent'
+      ? JSON.stringify({
+          ...safeParseContent(event.message.content),
+          text: `${safeParseContent(event.message.content).text ?? ''}\n\n[Message processor findings]\n${decision.context}\n[/Message processor findings]`,
+        })
+      : event.message.content;
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
   await writeSessionMessage(session.agent_group_id, session.id, {
     id: messageId,
@@ -593,9 +603,22 @@ async function deliverToAgent(
     platformId: deliveryAddr.platformId,
     channelType: deliveryAddr.channelType,
     threadId: deliveryAddr.threadId,
-    content: event.message.content,
-    trigger: wake,
+    content: inboundContent,
+    trigger: wake && !handled,
+    status: handled ? 'completed' : 'pending',
   });
+
+  if (handled) {
+    await writeOutboundDirect(session.agent_group_id, session.id, {
+      id: `processor-${messageId}`,
+      kind: 'chat',
+      platformId: deliveryAddr.platformId,
+      channelType: deliveryAddr.channelType,
+      threadId: deliveryAddr.threadId,
+      content: JSON.stringify({ text: decision.text }),
+    });
+    return;
+  }
 
   if (wake) {
     // Cross-session context: fan the triggering message into sibling

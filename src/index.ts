@@ -16,6 +16,7 @@ import { startHostInstanceLease, stopHostInstanceLease } from './host-instance.j
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { startHostModules, stopHostModules } from './host-lifecycle.js';
 import { routeInbound } from './router.js';
+import { initInboundProcessor } from './inbound-processor.js';
 import { log } from './log.js';
 import { enforceUpgradeTripwire } from './upgrade-state.js';
 
@@ -87,6 +88,7 @@ async function main(): Promise<void> {
   await adoptRunningSessions();
 
   // 3. Channel adapters
+  initInboundProcessor();
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {
     return {
       onInbound(platformId, threadId, message) {

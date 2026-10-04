@@ -281,6 +281,7 @@ export async function writeSessionMessage(
      * Dying containers (past first poll) skip these rows.
      */
     onWake?: boolean;
+    status?: 'pending' | 'completed';
   },
 ): Promise<void> {
   // Documented reset: operators `rm -rf` a session folder to clear a stuck
@@ -308,6 +309,7 @@ export async function writeSessionMessage(
       trigger: message.trigger ?? true,
       sourceSessionId: message.sourceSessionId ?? null,
       onWake: message.onWake ?? false,
+      status: message.status ?? 'pending',
     });
   });
   await updateSession(sessionId, { last_active: new Date().toISOString() });

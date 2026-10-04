@@ -6,6 +6,7 @@
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
+import { createServer } from 'node:http';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import {
@@ -29,6 +30,7 @@ import {
 import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
 import { getSession, findSession } from './db/sessions.js';
 import type { InboundEvent } from './channels/adapter.js';
+import { setInboundProcessor, socketMessageProcessor } from './inbound-processor.js';
 
 // Mock container runner to prevent actual Docker spawning
 vi.mock('./container-runner.js', () => ({
@@ -440,6 +442,150 @@ describe('router', () => {
 
     // Verify container was woken
     expect(wakeContainer).toHaveBeenCalled();
+  });
+
+  async function withProcessor(result: unknown, run: (requests: unknown[]) => Promise<void>) {
+    const requests: unknown[] = [];
+    const socket = path.join(TEST_DIR, 'processor.sock');
+    const server = createServer((request, response) => {
+      void (async () => {
+        const chunks: Buffer[] = [];
+        for await (const chunk of request) chunks.push(Buffer.from(chunk));
+        requests.push(JSON.parse(Buffer.concat(chunks).toString()));
+        response.setHeader('content-type', 'application/json');
+        response.end(JSON.stringify({ result }));
+      })().catch((error) => response.destroy(error instanceof Error ? error : new Error('Fake broker failed')));
+    });
+    await new Promise<void>((resolve) => server.listen(socket, resolve));
+    setInboundProcessor(socketMessageProcessor(socket, 'test-agent'));
+    try {
+      await run(requests);
+    } finally {
+      setInboundProcessor(null);
+      await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    }
+  }
+
+  const processorEvent = (): InboundEvent => ({
+    channelType: 'discord',
+    platformId: 'chan-123',
+    threadId: null,
+    message: {
+      id: 'preflight-message',
+      kind: 'chat',
+      timestamp: '2026-10-03T12:00:00.000Z',
+      content: JSON.stringify({ senderId: 'discord:operator', sender: 'Martin', text: 'Record this purchase.' }),
+    },
+  });
+
+  it('delivers a processor response without waking or exposing pending input to a running model', async () => {
+    const { routeInbound } = await import('./router.js');
+    const { wakeContainer } = await import('./container-runner.js');
+    vi.mocked(wakeContainer).mockClear();
+    await withProcessor({ route: 'handled', text: 'Already entered.' }, async (requests) => {
+      const event = processorEvent();
+      await routeInbound(event);
+      await routeInbound(event);
+      const session = await findSession('mg-1', null);
+      const input = new Database(inboundDbPath('ag-1', session!.id));
+      expect(input.prepare('SELECT status, trigger, content FROM messages_in').all()).toEqual([
+        { status: 'completed', trigger: 0, content: event.message.content },
+      ]);
+      input.close();
+      const output = new Database(outboundDbPath('ag-1', session!.id));
+      expect(
+        output.prepare('SELECT kind, platform_id, channel_type, thread_id, content FROM messages_out').all(),
+      ).toEqual([
+        {
+          kind: 'chat',
+          platform_id: 'chan-123',
+          channel_type: 'discord',
+          thread_id: null,
+          content: JSON.stringify({ text: 'Already entered.' }),
+        },
+      ]);
+      output.close();
+      expect(requests).toHaveLength(2);
+      expect(requests[1]).toEqual(requests[0]);
+      expect(wakeContainer).not.toHaveBeenCalled();
+    });
+  });
+
+  it('wakes the agent with original input, sender identity and the missing facts', async () => {
+    const { routeInbound } = await import('./router.js');
+    const { wakeContainer } = await import('./container-runner.js');
+    vi.mocked(wakeContainer).mockClear();
+    const result = { route: 'agent', missing: ['payee'], intent: { total: '48.14' }, writeAttempted: false };
+    await withProcessor(result, async () => {
+      const event = processorEvent();
+      await routeInbound(event);
+      const session = await findSession('mg-1', null);
+      const input = new Database(inboundDbPath('ag-1', session!.id));
+      const row = input.prepare('SELECT status, trigger, content FROM messages_in').get() as {
+        status: string;
+        trigger: number;
+        content: string;
+      };
+      input.close();
+      expect(row.status).toBe('pending');
+      expect(row.trigger).toBe(1);
+      expect(JSON.parse(row.content)).toEqual({
+        senderId: 'discord:operator',
+        sender: 'Martin',
+        text: `Record this purchase.\n\n[Message processor findings]\n${JSON.stringify(result)}\n[/Message processor findings]`,
+      });
+      expect(wakeContainer).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('never sends denied input to the processor', async () => {
+    const { routeInbound, setAccessGate } = await import('./router.js');
+    setAccessGate(() => ({ allowed: false, reason: 'unknown sender' }));
+    try {
+      await withProcessor({ route: 'handled', text: 'Must not run.' }, async (requests) => {
+        await routeInbound(processorEvent());
+        expect(requests).toEqual([]);
+        expect(await findSession('mg-1', null)).toBeUndefined();
+      });
+    } finally {
+      setAccessGate(() => ({ allowed: true }));
+    }
+  });
+
+  it('keeps plain-text input on the ordinary agent path', async () => {
+    const { routeInbound } = await import('./router.js');
+    const { wakeContainer } = await import('./container-runner.js');
+    vi.mocked(wakeContainer).mockClear();
+    await withProcessor({ route: 'handled', text: 'Must not run.' }, async (requests) => {
+      const event = processorEvent();
+      event.message.content = 'Record this purchase.';
+      await routeInbound(event);
+      const session = await findSession('mg-1', null);
+      const input = new Database(inboundDbPath('ag-1', session!.id));
+      expect(input.prepare('SELECT status, trigger, content FROM messages_in').all()).toEqual([
+        { status: 'pending', trigger: 1, content: event.message.content },
+      ]);
+      input.close();
+      expect(requests).toEqual([]);
+      expect(wakeContainer).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('passes a lost processor response to the agent as an uncertain outcome', async () => {
+    const { routeInbound } = await import('./router.js');
+    await withProcessor({ route: 'handled' }, async () => {
+      await routeInbound(processorEvent());
+      const session = await findSession('mg-1', null);
+      const input = new Database(inboundDbPath('ag-1', session!.id));
+      const row = input.prepare('SELECT content FROM messages_in').get() as { content: string };
+      input.close();
+      const findings = JSON.parse(
+        JSON.parse(row.content)
+          .text.split('[Message processor findings]\n')[1]
+          .split('\n[/Message processor findings]')[0],
+      );
+      expect(findings.outcomeUncertain).toBe(true);
+    });
   });
 
   it('auto-creates messaging group only when the bot is addressed (mention/DM)', async () => {

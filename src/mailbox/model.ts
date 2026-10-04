@@ -40,6 +40,8 @@ export interface InboundWrite {
   trigger?: boolean;
   sourceSessionId?: string | null;
   onWake?: boolean;
+  /** Host-handled input is inserted completed, so a running model cannot claim it. */
+  status?: 'pending' | 'completed';
 }
 
 export interface InboundRecord {
@@ -298,6 +300,7 @@ export function parseInboundWrite(value: unknown): InboundWrite {
     'trigger',
     'sourceSessionId',
     'onWake',
+    'status',
   ]);
   return {
     id: text(record, 'id'),
@@ -312,6 +315,7 @@ export function parseInboundWrite(value: unknown): InboundWrite {
     ...('trigger' in record ? { trigger: optionalBoolean(record, 'trigger') } : {}),
     ...('sourceSessionId' in record ? { sourceSessionId: optionalNullableText(record, 'sourceSessionId') } : {}),
     ...('onWake' in record ? { onWake: optionalBoolean(record, 'onWake') } : {}),
+    ...('status' in record ? { status: oneOf(record, 'status', ['pending', 'completed'] as const) } : {}),
   };
 }
 
@@ -574,7 +578,7 @@ export function createInboundRecord(message: InboundWrite, sequence: number): In
   return parseInboundRecord({
     ...input,
     sequence,
-    status: 'pending',
+    status: input.status ?? 'pending',
     seriesId: input.id,
     tries: 0,
     trigger: input.trigger ?? true,
