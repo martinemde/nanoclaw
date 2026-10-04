@@ -52,7 +52,12 @@ export function socketMessageProcessor(socketPath: string, folder: string): Inbo
     const body = JSON.stringify({
       operation: 'message.handle',
       correlationId: id,
-      message: { id, text: content.text, attachments: (content.attachments?.length ?? 0) > 0 },
+      message: {
+        id,
+        text: content.text,
+        receivedAt: event.message.timestamp,
+        attachments: (content.attachments?.length ?? 0) > 0,
+      },
     });
     try {
       const result = await post(socketPath, body);
