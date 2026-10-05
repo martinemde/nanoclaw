@@ -306,4 +306,45 @@ describe('persistent Matrix E2EE', () => {
     expect(inbound).toHaveLength(0);
     expect(JSON.parse(fs.readFileSync(pendingFile, 'utf8'))).toEqual({});
   });
+
+  it('renders a question with its reply options and attachment names as one Matrix text body', async () => {
+    const fake = fakeMatrixClient();
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-matrix-render-'));
+    cleanup.push(stateDir);
+    const adapter = new PersistentMatrixAdapter(
+      { baseUrl: 'https://matrix.test', accessToken: 'secret', userId: '@finances:matrix.test', stateDir },
+      (async () => fake) as unknown as MatrixClientFactory,
+    );
+    await adapter.setup(setupRecorder().setup);
+
+    await expect(
+      adapter.deliver('matrix:@martin:matrix.test', null, {
+        kind: 'chat-sdk',
+        content: {
+          type: 'ask_question',
+          questionId: 'approval-1',
+          title: 'Confirm',
+          question: 'Proceed?',
+          options: [
+            { label: 'Yes', value: 'approved' },
+            { label: 'No', value: 'rejected' },
+          ],
+        },
+        files: [
+          { filename: 'proof.bin', data: Buffer.from([0, 1, 255]) },
+          { filename: 'log.txt', data: Buffer.from('ok') },
+        ],
+      }),
+    ).resolves.toBe('$reply');
+
+    expect(fake.sent).toEqual([
+      {
+        roomId: '!dm:matrix.test',
+        content: {
+          msgtype: 'm.text',
+          body: 'Confirm\n\nProceed?\n\nReply with: Yes, No\n\nAttachments: proof.bin, log.txt',
+        },
+      },
+    ]);
+  });
 });
